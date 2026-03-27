@@ -57,9 +57,7 @@ module fpnew_fma_multi #(
   // Indication of valid data in flight
   output logic                        busy_o,
   // External register enable override
-  input  logic [ExtRegEnaWidth-1:0]   reg_ena_i,
-  // Early valid for external structural hazard generation
-  output logic                        early_out_valid_o
+  input  logic [ExtRegEnaWidth-1:0]   reg_ena_i
 );
 
   // ----------
@@ -68,20 +66,20 @@ module fpnew_fma_multi #(
   // The super-format that can hold all formats
   localparam fpnew_pkg::fp_encoding_t SUPER_FORMAT = fpnew_pkg::super_format(FpFmtConfig);
 
-  localparam int unsigned SUPER_EXP_BITS = SUPER_FORMAT.exp_bits;
-  localparam int unsigned SUPER_MAN_BITS = SUPER_FORMAT.man_bits;
+  localparam int unsigned SUPER_EXP_BITS = SUPER_FORMAT.exp_bits; //8
+  localparam int unsigned SUPER_MAN_BITS = SUPER_FORMAT.man_bits; //23
 
   // Precision bits 'p' include the implicit bit
-  localparam int unsigned PRECISION_BITS = SUPER_MAN_BITS + 1;
+  localparam int unsigned PRECISION_BITS = SUPER_MAN_BITS + 1; //24
   // The lower 2p+3 bits of the internal FMA result will be needed for leading-zero detection
-  localparam int unsigned LOWER_SUM_WIDTH  = 2 * PRECISION_BITS + 3;
-  localparam int unsigned LZC_RESULT_WIDTH = $clog2(LOWER_SUM_WIDTH);
+  localparam int unsigned LOWER_SUM_WIDTH  = 2 * PRECISION_BITS + 3; //51
+  localparam int unsigned LZC_RESULT_WIDTH = $clog2(LOWER_SUM_WIDTH); //6
   // Internal exponent width of FMA must accomodate all meaningful exponent values in order to avoid
   // datapath leakage. This is either given by the exponent bits or the width of the LZC result.
   // In most reasonable FP formats the internal exponent will be wider than the LZC result.
-  localparam int unsigned EXP_WIDTH = fpnew_pkg::maximum(SUPER_EXP_BITS + 2, LZC_RESULT_WIDTH);
+  localparam int unsigned EXP_WIDTH = fpnew_pkg::maximum(SUPER_EXP_BITS + 2, LZC_RESULT_WIDTH); //10
   // Shift amount width: maximum internal mantissa size is 3p+4 bits
-  localparam int unsigned SHIFT_AMOUNT_WIDTH = $clog2(3 * PRECISION_BITS + 5);
+  localparam int unsigned SHIFT_AMOUNT_WIDTH = $clog2(3 * PRECISION_BITS + 5); //24*3+5=77 -> 7 bits
   // Pipelines
   localparam NUM_INP_REGS = PipeConfig == fpnew_pkg::BEFORE
                             ? NumPipeRegs
@@ -798,9 +796,9 @@ module fpnew_fma_multi #(
 
     if (FpFmtConfig[fmt]) begin : active_format
       always_comb begin : post_process
-        // detect of / uf
+        // detect of / uf        
         fmt_uf_after_round[fmt] = (rounded_abs[EXP_BITS+MAN_BITS-1:MAN_BITS] == '0) // denormal
-        || ((pre_round_abs[EXP_BITS+MAN_BITS-1:MAN_BITS] == '0) && (rounded_abs[EXP_BITS+MAN_BITS-1:MAN_BITS] == 1) &&
+        || ((pre_round_abs[EXP_BITS+MAN_BITS-1:MAN_BITS] == '0) && (rounded_abs[EXP_BITS+MAN_BITS-1:MAN_BITS] == 1) && 
               ((round_sticky_bits != 2'b11) || (!sum_sticky_bits[MAN_BITS*2 + 4] && ((rnd_mode_q == fpnew_pkg::RNE) || (rnd_mode_q == fpnew_pkg::RMM)))));
         fmt_of_after_round[fmt] = rounded_abs[EXP_BITS+MAN_BITS-1:MAN_BITS] == '1; // inf exp.
 
@@ -894,19 +892,4 @@ module fpnew_fma_multi #(
   assign aux_o           = out_pipe_aux_q[NUM_OUT_REGS];
   assign out_valid_o     = out_pipe_valid_q[NUM_OUT_REGS];
   assign busy_o          = (| {inp_pipe_valid_q, mid_pipe_valid_q, out_pipe_valid_q});
-
-  // Early valid_o signal. This is used for dispatching instructions for dual-issue processor.
-  if (NUM_OUT_REGS > 0) begin
-    assign early_out_valid_o = |{out_pipe_valid_q[NUM_OUT_REGS] & ~out_pipe_ready[NUM_OUT_REGS],
-                                 out_pipe_valid_q[NUM_OUT_REGS-1]};
-  end else if (NUM_MID_REGS > 0) begin
-    assign early_out_valid_o = |{mid_pipe_valid_q[NUM_MID_REGS] & ~mid_pipe_ready[NUM_OUT_REGS],
-                                 mid_pipe_valid_q[NUM_MID_REGS-1]};
-  end else if (NUM_INP_REGS > 0) begin
-    assign early_out_valid_o = |{inp_pipe_valid_q[NUM_INP_REGS] & ~inp_pipe_ready[NUM_INP_REGS],
-                                 inp_pipe_valid_q[NUM_INP_REGS-1]};
-  end else begin
-    assign early_out_valid_o = 1'b0;
-  end
-
 endmodule

@@ -1,3 +1,74 @@
+# TransDot — Transprecision Dot-Product FPU
+
+TransDot extends [FPnew](https://github.com/pulp-platform/fpnew) with transprecision dot-product (DP) support across FP32, FP16, FP8, and FP4 formats, plus SIMD FMA operations — all in a single fused datapath with area parity to the FPnew baseline.
+
+## Quickstart
+
+```bash
+source sourceme.sh
+```
+
+### Full TransDot Regression (FP32/FP16/FP8 scalar + SIMD + DP)
+
+```bash
+cd tb/sv_tb_new
+export FPNEW_HOME=$(git rev-parse --show-toplevel)
+vcs -sverilog -full64 -f filelist.f -top tb_fpnew -o simv -timescale=1ns/1ps
+./simv +TESTMODE=simd    # runs all formats: scalar, SIMD, DP
+```
+
+Expected: **2048/2048** vectors pass (256 per format × 8 formats).
+
+### No-DP Variant Regression (FP32/FP16/FP8 scalar + SIMD only)
+
+```bash
+cd tb/sv_tb_new
+export FPNEW_HOME=$(git rev-parse --show-toplevel)
+vcs -sverilog -full64 \
+  -f $FPNEW_HOME/src/transdot_no_dp/filelist_best.f \
+  +define+SIMULATION \
+  $FPNEW_HOME/tb/sv_tb_new/tb_fpnew.sv \
+  -top tb_fpnew -o simv_nodp -timescale=1ns/1ps
+./simv_nodp +TESTMODE=simd
+```
+
+Expected: **1280/1280** vectors pass (256 per format × 5 formats). DP tests show 0/256 (expected — DP disabled).
+
+### Gate-Level Simulation
+
+After synthesis, verify the netlist:
+
+```bash
+cd tb/sv_tb_new
+vcs -sverilog -full64 \
+  -f filelist_syn.f \
+  -top tb_fpnew_syn -o simv_syn -timescale=1ns/1ps
+./simv_syn +TESTMODE=scalar
+./simv_syn +TESTMODE=simd
+```
+
+## Repository Structure
+
+```
+src/                          # RTL source
+  transdot_fp4_fp8_fp16_fp32_fma_opt.sv  # Full TransDot FMA (DP + SIMD)
+  transdot_decomp_*.sv                    # Decomposed datapath modules
+  fpnew_*.sv                              # FPnew base modules
+  transdot_no_dp/                         # No-DP single-module variant
+    transdot_fp16_fp32_fma_simd_base.sv   # Best no-DP design (5-12% smaller than FPnew)
+    filelist_best.f                        # Filelist for synthesis/simulation
+tb/                           # Testbenches and test data
+syn/                          # Synthesis scripts (gitignored outputs)
+instances/                    # FPU wrapper instances
+docs/                         # Documentation
+```
+
+## Synthesis
+
+For the no-DP variant, comment out `auto_ungroup none` in the synthesis script to enable flattening (yields 5-12% area savings vs FPnew baseline at all timing points).
+
+---
+
 # FPnew - New Floating-Point Unit with Transprecision Capabilities
 
 Parametric floating-point unit with support for standard RISC-V formats and operations as well as transprecision formats, written in SystemVerilog.
@@ -110,10 +181,25 @@ fpnew_top #(
   .tag_o,
   .out_valid_o,
   .out_ready_i,
-  .busy_o,
-  .early_valid_o
+  .busy_o
 );
 ```
+
+### TransDot Mode Encoding (Breaking API)
+
+TransDot mode control is opcode-driven in `fpnew_pkg::operation_e`. The legacy public sideband controls were removed from top-level/wrapper interfaces:
+
+- `dp_enable_i`
+- `simd_enable_i`
+- `fp4_enable_i`
+
+Use explicit operation IDs instead:
+
+- `TDOT_SIMD_FMADD` (`16`): merged SIMD FMA mode
+- `TDOT_DP_FMADD` (`17`): dot-product accumulation mode
+- `TDOT_FP4_DP_FMADD` (`18`): FP4 (E2M1) dot-product accumulation mode
+
+FP4 is now a first-class format (`FP4`) selected through `src_fmt_i`/`dst_fmt_i`.
 
 ### Documentation
 

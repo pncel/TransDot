@@ -1,3 +1,19 @@
 *~
 html
 Bender.lock
+syn/
+pwr/
+
+# Simulation artifacts
+tb/**/simv
+tb/**/simv.daidir/
+tb/**/csrc/
+tb/**/ucli.key
+tb/**/verdiLog/
+tb/**/DVEfiles/
+tb/**/novas*
+tb/**/*.fsdb
+tb/**/*.vcd
+tb/**/vcs.log
+tb/**/sim.log
+csrc/

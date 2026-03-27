@@ -19,6 +19,16 @@ Some points about the workflow:
 - GitHub pull requests should be used to contribute your work by opening a PR against `develop`.
 - Commits should reflect some meaningful step of work and will likely be squashed and rebased before merging if it's for a single feature only.
 
+## CI Workflow
+
+- CI entrypoint: `.github/workflows/transdot-ci.yml`
+- Canonical local check before opening PR:
+  - `SKIP_GEN=1 ./tb/sv_tb_new/run_regression.sh`
+
+## Release Procedure
+
+- Follow `docs/RELEASE_CHECKLIST.md` for release gating, tagging, and post-release steps.
+
 ## :wip: Under Construction
 
 This document is incomplete. We're working on it...

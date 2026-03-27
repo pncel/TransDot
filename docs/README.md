@@ -2,6 +2,12 @@
 
 FPnew is a parametric floating-point unit which supports standard RISC-V operations as well as transprecision formats, written in SystemVerilog.
 
+## TransDot Notes
+
+- Canonical regression flow: `SKIP_GEN=1 ./tb/sv_tb_new/run_regression.sh`
+- TransDot mode is selected via `op_i` (`TDOT_SIMD_FMADD`, `TDOT_DP_FMADD`, `TDOT_FP4_DP_FMADD`).
+- Legacy public sideband mode inputs (`dp_enable_i`, `simd_enable_i`, `fp4_enable_i`) were removed from top-level/wrapper interfaces.
+
 **Table of Contents**
 - [Top-Level Interface](#top-level-interface)
   - [Parameters](#parameters)
@@ -70,7 +76,6 @@ As the width of some input/output signals is defined by the configuration, it is
 | `out_valid_o`    | out       | `logic`              | Output data valid (see [Handshake](#handshake-interface))      |
 | `out_ready_i`    | in        | `logic`              | Output interface ready (see [Handshake](#handshake-interface)) |
 | `busy_o`         | out       | `logic`              | FPU operation in flight                                        |
-| `early_valid_o`  | out       | `logic`              | Output data valid in the next cycle                            |
 
 #### Data Types
 
@@ -93,7 +98,7 @@ Enumeration of type `logic [2:0]` holding available rounding modes, encoded for 
 
 ##### `operation_e` - FP Operation
 
-Enumeration of type `logic [3:0]` holding the FP operation.
+Enumeration of type `logic [4:0]` holding the FP operation.
 The operation modifier `op_mod_i` can change the operation carried out.
 Unless noted otherwise, the first operand `op[0]` is used for the operation.
 Unless noted otherwise, `op[0]` and `op[1]` are given in source FP format and `op[2]` is given in destination FP format.
@@ -123,6 +128,9 @@ Unless noted otherwise, `op[0]` and `op[1]` are given in source FP format and `o
 | `CPKAB`    | `1`      | Cast-and-pack `op[0]` and `op[1]` to entries 2, 3 of vector `op[2]`.                                                                                                                                             |
 | `CPKCD`    | `0`      | Cast-and-pack `op[0]` and `op[1]` to entries 4, 5 of vector `op[2]`.                                                                                                                                             |
 | `CPKCD`    | `1`      | Cast-and-pack `op[0]` and `op[1]` to entries 6, 7 of vector `op[2]`.                                                                                                                                             |
+| `TDOT_SIMD_FMADD`   | `0` | TransDot merged-SIMD fused multiply-add mode                                                                                                                                                                      |
+| `TDOT_DP_FMADD`     | `0` | TransDot dot-product fused multiply-add mode                                                                                                                                                                      |
+| `TDOT_FP4_DP_FMADD` | `0` | TransDot FP4 (E2M1) dot-product fused multiply-add mode                                                                                                                                                          |
 
 ##### `fp_format_e` - FP Formats
 
@@ -133,12 +141,13 @@ Enumeration of type `logic [2:0]` holding the supported FP formats.
 | `FP32`     | IEEE binary32 | 32 bit | 8         | 23        |
 | `FP64`     | IEEE binary64 | 64 bit | 11        | 52        |
 | `FP16`     | IEEE binary16 | 16 bit | 5         | 10        |
-| `FP8`      | binary8       | 8 bit  | 5         | 2         |
+| `FP8`      | binary8 (E4M3)| 8 bit  | 4         | 3         |
 | `FP16ALT`  | binary16alt   | 16 bit | 8         | 7         |
+| `FP4`      | binary4 (E2M1)| 4 bit  | 2         | 1         |
 
 The following global parameters associated with FP formats are set in `fpnew_pkg`:
 ```SystemVerilog
-localparam int unsigned NUM_FP_FORMATS = 5;
+localparam int unsigned NUM_FP_FORMATS = 6;
 localparam int unsigned FP_FORMAT_BITS = $clog2(NUM_FP_FORMATS);
 ```
 

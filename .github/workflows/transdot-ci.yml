@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: SHL-0.51
+name: TransDot CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+      - master
+
+jobs:
+  syntax-and-vector-smoke:
+    name: Syntax + Vector Smoke
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build FlexFloat (no tests/examples)
+        run: |
+          cmake -S tb/flexfloat -B tb/flexfloat/build -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF
+          cmake --build tb/flexfloat/build -j
+          cp tb/flexfloat/build/libflexfloat.a tb/flexfloat/libflexfloat.a
+
+      - name: Vector Generation Smoke
+        run: |
+          pushd tb/test_data_generate
+          g++ -std=c++17 -O2 \
+            -I../flexfloat/include \
+            generate_test_data.cpp \
+            -L../flexfloat -lflexfloat -lstdc++fs \
+            -o generate_test_data
+          ./generate_test_data 4 12345
+          popd
+
+      - name: Compile + Status Smoke
+        run: |
+          SKIP_GEN=1 MODE=status ./tb/sv_tb_new/run_regression.sh
+
+  regression-smoke-by-mode:
+    name: Regression Smoke (${{ matrix.mode }})
+    needs: syntax-and-vector-smoke
+    runs-on: self-hosted
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [scalar, simd, dp, fp4dp]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Regression Smoke
+        run: |
+          SKIP_GEN=1 MODE=${{ matrix.mode }} ./tb/sv_tb_new/run_regression.sh

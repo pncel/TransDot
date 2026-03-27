@@ -25,6 +25,7 @@ package fpnew_pkg;
   // | FP16       | IEEE binary16    | 16 bit | 5        | 10
   // | FP8        | binary8          |  8 bit | 5        | 2
   // | FP16ALT    | binary16alt      | 16 bit | 8        | 7
+  // | FP4        | E2M1             |  4 bit | 2        | 1
   // *NOTE:* Add new formats only at the end of the enumeration for backwards compatibilty!
 
   // Encoding for a format
@@ -33,7 +34,7 @@ package fpnew_pkg;
     int unsigned man_bits;
   } fp_encoding_t;
 
-  localparam int unsigned NUM_FP_FORMATS = 5; // change me to add formats
+  localparam int unsigned NUM_FP_FORMATS = 6; // change me to add formats
   localparam int unsigned FP_FORMAT_BITS = $clog2(NUM_FP_FORMATS);
 
   // FP formats
@@ -42,7 +43,8 @@ package fpnew_pkg;
     FP64    = 'd1,
     FP16    = 'd2,
     FP8     = 'd3,
-    FP16ALT = 'd4
+    FP16ALT = 'd4,
+    FP4     = 'd5
     // add new formats here
   } fp_format_e;
 
@@ -51,15 +53,16 @@ package fpnew_pkg;
     '{8,  23}, // IEEE binary32 (single)
     '{11, 52}, // IEEE binary64 (double)
     '{5,  10}, // IEEE binary16 (half)
-    '{5,  2},  // custom binary8
-    '{8,  7}   // custom binary16alt
+    '{4,  3},  // custom binary8
+    '{8,  7},  // custom binary16alt
+    '{2,  1}   // custom fp4 (E2M1)
     // add new formats here
   };
 
   typedef logic [0:NUM_FP_FORMATS-1]       fmt_logic_t;    // Logic indexed by FP format (for masks)
   typedef logic [0:NUM_FP_FORMATS-1][31:0] fmt_unsigned_t; // Unsigned indexed by FP format
 
-  localparam fmt_logic_t CPK_FORMATS = 5'b11000; // FP32 and FP64 can provide CPK only
+  localparam fmt_logic_t CPK_FORMATS = 6'b110000; // FP32 and FP64 can provide CPK only
 
   // ---------
   // INT TYPES
@@ -114,14 +117,17 @@ package fpnew_pkg;
     ADDMUL, DIVSQRT, NONCOMP, CONV
   } opgroup_e;
 
-  localparam int unsigned OP_BITS = 4;
+  localparam int unsigned OP_BITS = 5;
 
   typedef enum logic [OP_BITS-1:0] {
     FMADD, FNMSUB, ADD, MUL,     // ADDMUL operation group
     DIV, SQRT,                   // DIVSQRT operation group
     SGNJ, MINMAX, CMP, CLASSIFY, // NONCOMP operation group
     F2F, F2I, I2F, CPKAB, CPKCD, // CONV operation group
-    ADDS                         // ADDMUL operation group (ADDS is added here to preserve bit encoding of operations)
+    ADDS,                         // ADDMUL operation group (kept after CPK* to preserve legacy encoding)
+    TDOT_SIMD_FMADD,              // ADDMUL operation group (TransDot merged-SIMD FMADD)
+    TDOT_DP_FMADD,                // ADDMUL operation group (TransDot dot-product FMADD)
+    TDOT_FP4_DP_FMADD             // ADDMUL operation group (TransDot FP4 dot-product FMADD)
   } operation_e;
 
   // -------------
@@ -221,7 +227,7 @@ package fpnew_pkg;
     Width:         64,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     5'b11000,
+    FpFmtMask:     6'b110000,
     IntFmtMask:    4'b0011
   };
 
@@ -229,7 +235,7 @@ package fpnew_pkg;
     Width:         64,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     5'b11000,
+    FpFmtMask:     6'b110000,
     IntFmtMask:    4'b0010
   };
 
@@ -237,7 +243,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     5'b10000,
+    FpFmtMask:     6'b100000,
     IntFmtMask:    4'b0010
   };
 
@@ -245,7 +251,7 @@ package fpnew_pkg;
     Width:         64,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     5'b11111,
+    FpFmtMask:     6'b111110,
     IntFmtMask:    4'b1111
   };
 
@@ -253,7 +259,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     5'b10111,
+    FpFmtMask:     6'b101110,
     IntFmtMask:    4'b1110
   };
 
@@ -261,10 +267,81 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     5'b10001,
+    FpFmtMask:     6'b100010,
     IntFmtMask:    4'b0110
   };
 
+  localparam fpu_features_t fp32_addmul_no_simd = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b100000,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t fp16_addmul_no_simd = '{
+    Width:         16,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b000010,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t fp32_fp16_addmul_no_simd = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b101000,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t fp32_fp16_addmul_simd = '{
+    Width:         32,
+    EnableVectors: 1'b1,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b101000,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t fp32_fp16_fp8_addmul_no_simd = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b101100,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t fp32_fp16_fp8_addmul_simd = '{
+    Width:         32,
+    EnableVectors: 1'b1,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b101100,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t int32_addmul_no_simd = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b100000,
+    IntFmtMask:    4'b0010
+  };
+
+  localparam fpu_features_t transdot_features = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b101100,
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_fp16_dp_only = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     6'b101000,
+    IntFmtMask:    4'b0000
+  };
 
   // FPU configuraion: implementation
   typedef struct packed {
@@ -289,6 +366,36 @@ package fpnew_pkg;
                   '{default: PARALLEL}, // NONCOMP
                   '{default: MERGED}},  // CONV
     PipeConfig: BEFORE
+  };
+
+  localparam fpu_implementation_t ADDMUL_ONLY = '{
+    PipeRegs:   '{default: 4},
+    UnitTypes:  '{'{default: MERGED}, // ADDMUL
+                  '{default: DISABLED}, // DIVSQRT
+                  '{default: DISABLED}, // NONCOMP
+                  '{default: DISABLED}},  // CONV
+    //PipeConfig: BEFORE
+    PipeConfig: DISTRIBUTED
+  };
+
+  localparam fpu_implementation_t ADDMUL_ONLY_PIPE3 = '{
+    PipeRegs:   '{default: 3},
+    UnitTypes:  '{'{default: MERGED}, // ADDMUL
+                  '{default: DISABLED}, // DIVSQRT
+                  '{default: DISABLED}, // NONCOMP
+                  '{default: DISABLED}},  // CONV
+    //PipeConfig: BEFORE
+    PipeConfig: DISTRIBUTED
+  };
+
+  localparam fpu_implementation_t ADDMUL_ONLY_PIPE1 = '{
+    PipeRegs:   '{default: 1},
+    UnitTypes:  '{'{default: MERGED}, // ADDMUL
+                  '{default: DISABLED}, // DIVSQRT
+                  '{default: DISABLED}, // NONCOMP
+                  '{default: DISABLED}},  // CONV
+    PipeConfig: BEFORE
+    //PipeConfig: DISTRIBUTED
   };
 
   // -----------------------
@@ -377,12 +484,28 @@ package fpnew_pkg;
   // Returns the operation group of the given operation
   function automatic opgroup_e get_opgroup(operation_e op);
     unique case (op)
-      FMADD, FNMSUB, ADD, ADDS, MUL: return ADDMUL;
-      DIV, SQRT:                     return DIVSQRT;
-      SGNJ, MINMAX, CMP, CLASSIFY:   return NONCOMP;
-      F2F, F2I, I2F, CPKAB, CPKCD:   return CONV;
-      default:                       return NONCOMP;
+      FMADD, FNMSUB, ADD, ADDS, MUL,
+      TDOT_SIMD_FMADD, TDOT_DP_FMADD, TDOT_FP4_DP_FMADD: return ADDMUL;
+      DIV, SQRT:                                                 return DIVSQRT;
+      SGNJ, MINMAX, CMP, CLASSIFY:                               return NONCOMP;
+      F2F, F2I, I2F, CPKAB, CPKCD:                               return CONV;
+      default:                                                   return NONCOMP;
     endcase
+  endfunction
+
+  // Returns whether the operation selects TransDot DP behavior.
+  function automatic logic is_transdot_dp_op(operation_e op);
+    return (op == TDOT_DP_FMADD) || (op == TDOT_FP4_DP_FMADD);
+  endfunction
+
+  // Returns whether the operation selects TransDot merged SIMD behavior.
+  function automatic logic is_transdot_simd_op(operation_e op);
+    return (op == TDOT_SIMD_FMADD);
+  endfunction
+
+  // Returns whether the operation selects the FP4 TransDot path.
+  function automatic logic is_transdot_fp4_op(operation_e op);
+    return (op == TDOT_FP4_DP_FMADD);
   endfunction
 
   // Returns the number of operands by operation group
@@ -409,7 +532,7 @@ package fpnew_pkg;
     // Returns the maximum number of lanes in the FPU according to width, format config and vectors
   function automatic int unsigned num_divsqrt_lanes(int unsigned width, fmt_logic_t cfg, logic vec, divsqrt_unit_t DivSqrtSel);
     automatic fmt_logic_t cfg_tmp;
-    cfg_tmp = (DivSqrtSel == THMULTI) ? cfg & 5'b11101 : cfg;
+    cfg_tmp = (DivSqrtSel == THMULTI) ? cfg & 6'b111010 : cfg;
     return vec ? width / min_fp_width(cfg_tmp) : 1; // if no vectors, only one lane
   endfunction
 

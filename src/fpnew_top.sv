@@ -53,8 +53,7 @@ module fpnew_top #(
   output logic                              out_valid_o,
   input  logic                              out_ready_i,
   // Indication of valid data in flight
-  output logic                              busy_o,
-  output logic                              early_valid_o
+  output logic                              busy_o
 );
 
   localparam int unsigned NUM_OPGROUPS = fpnew_pkg::NUM_OPGROUPS;
@@ -71,7 +70,6 @@ module fpnew_top #(
 
   // Handshake signals for the blocks
   logic [NUM_OPGROUPS-1:0] opgrp_in_ready, opgrp_out_valid, opgrp_out_ready, opgrp_ext, opgrp_busy;
-  logic [NUM_OPGROUPS-1:0] opgrp_early_valid;
   output_t [NUM_OPGROUPS-1:0] opgrp_outputs;
 
   logic [NUM_FORMATS-1:0][NUM_OPERANDS-1:0] is_boxed;
@@ -80,7 +78,7 @@ module fpnew_top #(
   // Input Side
   // -----------
   assign in_ready_o = in_valid_i & opgrp_in_ready[fpnew_pkg::get_opgroup(op_i)];
-
+  //assign enable_nan_box = Features.EnableNanBox;
   // NaN-boxing check
   for (genvar fmt = 0; fmt < int'(NUM_FORMATS); fmt++) begin : gen_nanbox_check
     localparam int unsigned FP_WIDTH = fpnew_pkg::fp_width(fpnew_pkg::fp_format_e'(fmt));
@@ -159,8 +157,7 @@ module fpnew_top #(
       .tag_o           ( opgrp_outputs[opgrp].tag    ),
       .out_valid_o     ( opgrp_out_valid[opgrp]      ),
       .out_ready_i     ( opgrp_out_ready[opgrp]      ),
-      .busy_o          ( opgrp_busy[opgrp]           ),
-      .early_valid_o   ( opgrp_early_valid[opgrp]    )
+      .busy_o          ( opgrp_busy[opgrp]           )
     );
   end
 
@@ -193,7 +190,6 @@ module fpnew_top #(
   assign status_o        = arbiter_output.status;
   assign tag_o           = arbiter_output.tag;
 
-  assign early_valid_o   = |opgrp_early_valid;
   assign busy_o = (| opgrp_busy);
 
 endmodule

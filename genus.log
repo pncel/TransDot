@@ -1,0 +1,50 @@
+Cadence Genus(TM) Synthesis Solution.
+Copyright 2025 Cadence Design Systems, Inc. All rights reserved worldwide.
+Cadence and the Cadence logo are registered trademarks and Genus is a trademark
+of Cadence Design Systems, Inc. in the United States and other countries.
+
+[16:54:09.429002] Configured Lic search path (25.01-s002): 27006@cadencels.s.uw.edu:27008@synopsysls.s.uw.edu
+
+Version: 25.10-p002_1, built Thu Apr 17 15:35:38 PDT 2025
+Options: -no_gui -overwrite -files /tmp/help_dp_analytical.tcl 
+Date:    Wed Feb 25 16:54:09 2026
+Host:    squire.ece.uw.edu (x86_64 w/Linux 4.18.0-553.50.1.el8_10.x86_64) (32cores*128cpus*2physical cpus*AMD EPYC 9374F 32-Core Processor 1024KB) (791607792KB)
+PID:     2260166
+OS:      AlmaLinux 8.10 (Cerulean Leopard)
+
+Checking out license: Genus_Synthesis
+[16:54:09.470529] Periodic Lic check successful
+[16:54:09.470545] Feature usage summary:
+[16:54:09.470545] Genus_Synthesis  
+
+
+***********************************************************************************************************
+***********************************************************************************************************
+
+
+
+Finished executable startup (5 seconds elapsed).
+
+Loading tool scripts...
+Finished loading tool scripts (8 seconds elapsed).
+
+#@ Processing -files option
+@genus:root: 1> source /tmp/help_dp_analytical.tcl
+#@ Begin verbose source /tmp/help_dp_analytical.tcl
+@file(help_dp_analytical.tcl) 1: help root: dp_analytical_opt -detail
+Attribute: dp_analytical_opt (on obj_type: root)
+  Description:            Specifies the effort level for global datapath optimization.
+  category:               dp
+  default_value:          standard
+  is_computed:            false
+  is_settable:            true
+  skip_in_db:             false
+  type:                   enum { off standard extreme }
+
+@file(help_dp_analytical.tcl) 2: quit
+
+Lic Summary:
+[16:54:18.036057] Cdslmd servers: swlic11
+[16:54:18.560354] Feature usage summary:
+[16:54:18.560354] Genus_Synthesis  
+Normal exit.

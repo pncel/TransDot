@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) a
 In this sense, we interpret the "Public API" of a hardware module as its port/parameter list.
 Versions of the IP in the same major relase are "pin-compatible" with each other. Minor relases are permitted to add new parameters as long as their default bindings ensure backwards compatibility.
 
+## [Unreleased]
+
+### Added
+- Added explicit TransDot operation encodings in `operation_e`:
+  - `TDOT_SIMD_FMADD` (`16`)
+  - `TDOT_DP_FMADD` (`17`)
+  - `TDOT_FP4_DP_FMADD` (`18`)
+- Added FP4 as first-class format (`FP4`, E2M1) in package format tables.
+- Added directed status regression checks for scalar/SIMD/DP/FP4 modes.
+
+### Changed
+- Canonical TransDot core is now `src/transdot_fp4_fp8_fp16_fp32_fma_opt.sv`; redundant variants removed.
+- Mode control is now opcode-driven through `op_i`; public sideband mode ports were removed:
+  - `dp_enable_i`
+  - `simd_enable_i`
+  - `fp4_enable_i`
+- Canonical regression flow consolidated to `tb/sv_tb_new` with compatibility wrappers in `tb/sv_tb_fp8_fp4`.
+- `Bender.yml` and `src_files.yml` updated to include active TransDot source set and wrappers.
+
+### Fixed
+- Resolved active status-merge TODO in canonical datapath.
+- Corrected FP4 DP decode/format routing in canonical flow.
+
 
 ## [0.8.0] - 2023-06-02
 
