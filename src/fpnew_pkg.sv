@@ -18,14 +18,15 @@ package fpnew_pkg;
   // ---------
   // FP TYPES
   // ---------
-  // | Enumerator | Format           | Width  | EXP_BITS | MAN_BITS
-  // |:----------:|------------------|-------:|:--------:|:--------:
-  // | FP32       | IEEE binary32    | 32 bit | 8        | 23
-  // | FP64       | IEEE binary64    | 64 bit | 11       | 52
-  // | FP16       | IEEE binary16    | 16 bit | 5        | 10
-  // | FP8        | binary8          |  8 bit | 5        | 2
-  // | FP16ALT    | binary16alt      | 16 bit | 8        | 7
-  // | FP4        | E2M1             |  4 bit | 2        | 1
+  // | Enumerator | Format                | Width  | EXP_BITS | MAN_BITS
+  // |:----------:|-----------------------|-------:|:--------:|:--------:
+  // | FP32       | IEEE binary32         | 32 bit | 8        | 23
+  // | FP64       | IEEE binary64         | 64 bit | 11       | 52
+  // | FP16       | IEEE binary16         | 16 bit | 5        | 10
+  // | FP8        | binary8 (E4M3)        |  8 bit | 4        | 3
+  // | FP16ALT    | binary16alt (BF16)    | 16 bit | 8        | 7
+  // | FP4        | E2M1                  |  4 bit | 2        | 1
+  // | FP8ALT     | binary8alt (E5M2)     |  8 bit | 5        | 2
   // *NOTE:* Add new formats only at the end of the enumeration for backwards compatibilty!
 
   // Encoding for a format
@@ -34,7 +35,7 @@ package fpnew_pkg;
     int unsigned man_bits;
   } fp_encoding_t;
 
-  localparam int unsigned NUM_FP_FORMATS = 6; // change me to add formats
+  localparam int unsigned NUM_FP_FORMATS = 7; // change me to add formats
   localparam int unsigned FP_FORMAT_BITS = $clog2(NUM_FP_FORMATS);
 
   // FP formats
@@ -44,7 +45,8 @@ package fpnew_pkg;
     FP16    = 'd2,
     FP8     = 'd3,
     FP16ALT = 'd4,
-    FP4     = 'd5
+    FP4     = 'd5,
+    FP8ALT  = 'd6
     // add new formats here
   } fp_format_e;
 
@@ -53,16 +55,17 @@ package fpnew_pkg;
     '{8,  23}, // IEEE binary32 (single)
     '{11, 52}, // IEEE binary64 (double)
     '{5,  10}, // IEEE binary16 (half)
-    '{4,  3},  // custom binary8
-    '{8,  7},  // custom binary16alt
-    '{2,  1}   // custom fp4 (E2M1)
+    '{4,  3},  // custom binary8 (E4M3)
+    '{8,  7},  // custom binary16alt (BF16)
+    '{2,  1},  // custom fp4 (E2M1)
+    '{5,  2}   // custom binary8alt (E5M2) — wider exp than E4M3
     // add new formats here
   };
 
   typedef logic [0:NUM_FP_FORMATS-1]       fmt_logic_t;    // Logic indexed by FP format (for masks)
   typedef logic [0:NUM_FP_FORMATS-1][31:0] fmt_unsigned_t; // Unsigned indexed by FP format
 
-  localparam fmt_logic_t CPK_FORMATS = 6'b110000; // FP32 and FP64 can provide CPK only
+  localparam fmt_logic_t CPK_FORMATS = 7'b1100000; // FP32 and FP64 can provide CPK only
 
   // ---------
   // INT TYPES
@@ -75,15 +78,19 @@ package fpnew_pkg;
   // | INT64      | 64 bit |
   // *NOTE:* Add new formats only at the end of the enumeration for backwards compatibilty!
 
-  localparam int unsigned NUM_INT_FORMATS = 4; // change me to add formats
+  localparam int unsigned NUM_INT_FORMATS = 5; // change me to add formats
   localparam int unsigned INT_FORMAT_BITS = $clog2(NUM_INT_FORMATS);
 
-  // Int formats
+  // Int formats. INT4 is appended last to preserve the legacy enum encoding
+  // for INT8/16/32/64; it covers the MFSA paper's INT4 DPA mode (k=8 lanes
+  // packed into one 32-b operand word). The paper expects the FP4 multiplier
+  // to be reused for INT4 (sign-mag → two's-complement on the FP4 DP2 stage).
   typedef enum logic [INT_FORMAT_BITS-1:0] {
     INT8,
     INT16,
     INT32,
-    INT64
+    INT64,
+    INT4
     // add new formats here
   } int_format_e;
 
@@ -94,6 +101,7 @@ package fpnew_pkg;
       INT16: return 16;
       INT32: return 32;
       INT64: return 64;
+      INT4:  return 4;
       default: begin
         // pragma translate_off
         $fatal(1, "Invalid INT format supplied");
@@ -127,7 +135,11 @@ package fpnew_pkg;
     ADDS,                         // ADDMUL operation group (kept after CPK* to preserve legacy encoding)
     TDOT_SIMD_FMADD,              // ADDMUL operation group (TransDot merged-SIMD FMADD)
     TDOT_DP_FMADD,                // ADDMUL operation group (TransDot dot-product FMADD)
-    TDOT_FP4_DP_FMADD             // ADDMUL operation group (TransDot FP4 dot-product FMADD)
+    TDOT_FP4_DP_FMADD,            // ADDMUL operation group (TransDot FP4 dot-product FMADD)
+    INT_DP_FMADD                  // ADDMUL-class integer DPA MAC (paper Section III-C INT path).
+                                  // int_fmt_i selects INT16 (2-DPA) or INT8 (4-DPA);
+                                  // op_mod_i = 0 for signed, 1 for unsigned operands.
+                                  // Result is INT32, written to the 32-b cascade.
   } operation_e;
 
   // -------------
@@ -227,7 +239,7 @@ package fpnew_pkg;
     Width:         64,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b110000,
+    FpFmtMask:     7'b1100000,
     IntFmtMask:    4'b0011
   };
 
@@ -235,7 +247,7 @@ package fpnew_pkg;
     Width:         64,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b110000,
+    FpFmtMask:     7'b1100000,
     IntFmtMask:    4'b0010
   };
 
@@ -243,7 +255,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b100000,
+    FpFmtMask:     7'b1000000,
     IntFmtMask:    4'b0010
   };
 
@@ -251,7 +263,7 @@ package fpnew_pkg;
     Width:         64,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b111110,
+    FpFmtMask:     7'b1111100,
     IntFmtMask:    4'b1111
   };
 
@@ -259,7 +271,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101110,
+    FpFmtMask:     7'b1011100,
     IntFmtMask:    4'b1110
   };
 
@@ -267,7 +279,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b100010,
+    FpFmtMask:     7'b1000100,
     IntFmtMask:    4'b0110
   };
 
@@ -275,7 +287,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b100000,
+    FpFmtMask:     7'b1000000,
     IntFmtMask:    4'b0000
   };
 
@@ -283,7 +295,7 @@ package fpnew_pkg;
     Width:         16,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b000010,
+    FpFmtMask:     7'b0000100,
     IntFmtMask:    4'b0000
   };
 
@@ -291,7 +303,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101000,
+    FpFmtMask:     7'b1010000,
     IntFmtMask:    4'b0000
   };
 
@@ -299,7 +311,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101000,
+    FpFmtMask:     7'b1010000,
     IntFmtMask:    4'b0000
   };
 
@@ -307,7 +319,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101100,
+    FpFmtMask:     7'b1011000,
     IntFmtMask:    4'b0000
   };
 
@@ -315,7 +327,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b1,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101100,
+    FpFmtMask:     7'b1011000,
     IntFmtMask:    4'b0000
   };
 
@@ -323,7 +335,7 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b100000,
+    FpFmtMask:     7'b1000000,
     IntFmtMask:    4'b0010
   };
 
@@ -331,15 +343,145 @@ package fpnew_pkg;
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101100,
+    FpFmtMask:     7'b1011010,
     IntFmtMask:    4'b0000
+  };
+
+  // INT-enabled variant for the MFSA paper INT8/INT16 DPA path. Same FP mask
+  // as `transdot_features` (FP32+FP16+FP8+FP4); IntFmtMask enables INT8/INT16/
+  // INT32 (4'b1110 = bits 0/1/2 → INT8/INT16/INT32 per int_format_e). INT64
+  // is left disabled because the array's 32-b cascade cannot carry it. INT4
+  // reuses the FP4 DP2 slot at runtime via `int4_mode_i` and is not a real
+  // int_format_e entry; it does not appear in IntFmtMask.
+  localparam fpu_features_t transdot_features_with_int = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011010,
+    IntFmtMask:    4'b1110
   };
 
   localparam fpu_features_t transdot_features_fp16_dp_only = '{
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     6'b101000,
+    FpFmtMask:     7'b1010000,
+    IntFmtMask:    4'b0000
+  };
+
+  // Cumulative per-format variants used by the ASIC PE-level area staircase
+  // (syn/asic/pe). Width stays at 32 so the PE port list is format-independent;
+  // the FpFmtMask grows by one format per stage. Each mask bit is cfg[fmt],
+  // indexed as [0:NUM_FP_FORMATS-1] → MSB of the literal is cfg[0]=FP32.
+  //   Bit position (MSB..LSB in the literal): FP32, FP64, FP16, FP8, FP16ALT, FP4
+  //
+  // NOTE: The transdot FMA's SIMD block (transdot_fp4_fp8_fp16_fp32_fma_opt.sv
+  // line 282) unconditionally slices [15:0] out of operands_q_simd whenever
+  // fmt iterates to FP16 or FP8, regardless of the config mask. That makes
+  // truly-single-format masks (FP16-only / FP8-only / FP4-only) fail
+  // elaboration because WIDTH=fp_width(that format) < 16. To keep every stage
+  // elaboratable we hold FP32 in the mask for every stage above the first.
+  localparam fpu_features_t transdot_features_stage1_fp32 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1000000,            // FP32
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_stage2_fp32_fp16 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1010000,            // FP32 + FP16
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_stage3_fp32_fp16_fp8 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011000,            // FP32 + FP16 + FP8
+    IntFmtMask:    4'b0000
+  };
+  // Stage 4 is `transdot_features` (7'b1011010, FP32+FP16+FP8+FP4).
+
+  // BF16 (FP16ALT, bit 4) feature masks for the ICCAD 2026 PPA study.
+  // FP32 (bit 0) is kept on in every variant to sidestep the SIMD-slice
+  // elab bug in transdot_fp4_fp8_fp16_fp32_fma_opt.sv (see line ~282 fix).
+  localparam fpu_features_t transdot_features_bf16_only = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1000100,            // FP32 + FP16ALT (BF16)
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp8 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011100,            // FP32 + FP16 + FP8 + FP16ALT
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp4 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1000110,            // FP32 + FP16ALT + FP4
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp8_fp4 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011110,            // FP32 + FP16 + FP8 + FP16ALT + FP4
+    IntFmtMask:    4'b0000
+  };
+
+  // ICCD-2026 Table IV cumulative INT staircase. Each step adds one int_format_e
+  // bit to the previous FP staircase. INT4 is *not* a separate cumulative step —
+  // it reuses the FP4 DP2 slot at runtime via int4_mode_i, so a config that has
+  // FP4 enabled in FpFmtMask already carries the INT4 silicon. INT8/INT16 do
+  // need their IntFmtMask bits flipped on; both are 16-bit-safe so they
+  // elaborate alongside the existing FpFmtMask without the elaborate guard
+  // tripping. IntFmtMask bit ordering (per int_format_e): bit 3 = INT8,
+  // bit 2 = INT16, bit 1 = INT32, bit 0 = INT64.
+  localparam fpu_features_t transdot_features_bf16_fp8_int8 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011100,            // FP32 + FP16 + FP8 + FP16ALT (no FP4)
+    IntFmtMask:    4'b1000               // INT8
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp8_fp4_int8 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011110,            // FP32 + FP16 + FP8 + FP16ALT + FP4
+    IntFmtMask:    4'b1000               // INT8 (INT4 carried by the FP4 DP2 path)
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp8_fp4_int8_int16 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011110,            // FP32 + FP16 + FP8 + FP16ALT + FP4
+    IntFmtMask:    4'b1100               // INT8 + INT16
+  };
+
+  // E5M2 (FP8ALT) added on top of the BF16 + FP8 + FP4 set. FP8ALT rides the
+  // FP8-DP path's 4-lane substrate (its 3-b effective mantissa fits the FP8
+  // 4×4 multiplier), with SUPER_EXP_BITS_FP8 widened to 5 to hold its 5-b
+  // exponent. Direct analog of how BF16 was added on top of FP16.
+  localparam fpu_features_t transdot_features_bf16_fp8_fp4_fp8alt = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1011111,            // FP32 + FP16 + FP8 + FP16ALT + FP4 + FP8ALT
     IntFmtMask:    4'b0000
   };
 
@@ -397,6 +539,31 @@ package fpnew_pkg;
     PipeConfig: BEFORE
     //PipeConfig: DISTRIBUTED
   };
+
+  // Zero-pipe variant used by the ASIC PE/array flow so the combinational
+  // critical path through one PE is what gets reported.
+  localparam fpu_implementation_t ADDMUL_ONLY_PIPE0 = '{
+    PipeRegs:   '{default: 0},
+    UnitTypes:  '{'{default: MERGED}, // ADDMUL
+                  '{default: DISABLED}, // DIVSQRT
+                  '{default: DISABLED}, // NONCOMP
+                  '{default: DISABLED}},  // CONV
+    PipeConfig: BEFORE
+  };
+
+  // 2-pipe variant (DISTRIBUTED) used for 2-term DPA iso-latency sweeps
+  // (BF16, FP4). RETIME must be on when synthesising this variant.
+  localparam fpu_implementation_t ADDMUL_ONLY_PIPE2 = '{
+    PipeRegs:   '{default: 2},
+    UnitTypes:  '{'{default: MERGED}, // ADDMUL
+                  '{default: DISABLED}, // DIVSQRT
+                  '{default: DISABLED}, // NONCOMP
+                  '{default: DISABLED}},  // CONV
+    PipeConfig: DISTRIBUTED
+  };
+
+  // Explicit 4-pipe alias of ADDMUL_ONLY for symmetry in PPA sweep tables.
+  localparam fpu_implementation_t ADDMUL_ONLY_PIPE4 = ADDMUL_ONLY;
 
   // -----------------------
   // Synthesis optimization
@@ -485,7 +652,8 @@ package fpnew_pkg;
   function automatic opgroup_e get_opgroup(operation_e op);
     unique case (op)
       FMADD, FNMSUB, ADD, ADDS, MUL,
-      TDOT_SIMD_FMADD, TDOT_DP_FMADD, TDOT_FP4_DP_FMADD: return ADDMUL;
+      TDOT_SIMD_FMADD, TDOT_DP_FMADD, TDOT_FP4_DP_FMADD,
+      INT_DP_FMADD:                                              return ADDMUL;
       DIV, SQRT:                                                 return DIVSQRT;
       SGNJ, MINMAX, CMP, CLASSIFY:                               return NONCOMP;
       F2F, F2I, I2F, CPKAB, CPKCD:                               return CONV;
@@ -506,6 +674,22 @@ package fpnew_pkg;
   // Returns whether the operation selects the FP4 TransDot path.
   function automatic logic is_transdot_fp4_op(operation_e op);
     return (op == TDOT_FP4_DP_FMADD);
+  endfunction
+
+  // Returns whether the operation selects the INT DPA path (paper §III-C).
+  function automatic logic is_int_dp_op(operation_e op);
+    return (op == INT_DP_FMADD);
+  endfunction
+
+  // Placeholder for the OCP MX DP path: today MXFP4/MXFP8 ride the existing
+  // TDOT_FP4_DP_FMADD / TDOT_DP_FMADD opcodes with a sideband mx_enable_i,
+  // so this returns 0. Promoted to a real check once Phase G migrates the
+  // sideband to dedicated MX_*_DP_FMADD opcodes.
+  function automatic logic is_mx_dp_op(operation_e op);
+    /* verilator lint_off UNUSED */
+    operation_e op_unused = op;
+    /* verilator lint_on UNUSED */
+    return 1'b0;
   endfunction
 
   // Returns the number of operands by operation group
@@ -532,7 +716,7 @@ package fpnew_pkg;
     // Returns the maximum number of lanes in the FPU according to width, format config and vectors
   function automatic int unsigned num_divsqrt_lanes(int unsigned width, fmt_logic_t cfg, logic vec, divsqrt_unit_t DivSqrtSel);
     automatic fmt_logic_t cfg_tmp;
-    cfg_tmp = (DivSqrtSel == THMULTI) ? cfg & 6'b111010 : cfg;
+    cfg_tmp = (DivSqrtSel == THMULTI) ? cfg & 7'b1110100 : cfg;
     return vec ? width / min_fp_width(cfg_tmp) : 1; // if no vectors, only one lane
   endfunction
 

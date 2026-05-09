@@ -37,6 +37,15 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   input  fpnew_pkg::fp_format_e       src_fmt_i,  // format of the multiplicands
   input  fpnew_pkg::fp_format_e       src2_fmt_i, // format of the addend
   input  fpnew_pkg::fp_format_e       dst_fmt_i,  // format of the result
+  input  fpnew_pkg::int_format_e      int_fmt_i,  // INT lane width when op_i == INT_DP_FMADD
+  // OCP MX sideband. mx_enable_i=1 augments the FP4-DP / FP8-DP / FP16-DP
+  // path with a shared E8M0 block scale: result *= 2^(scale_a + scale_b - 254).
+  // Scales are E8M0 (unsigned 8 b power-of-two; bias 127). mx_enable_i=0 is a
+  // no-op — bit-exact to pre-MX behavior. Phase A+B port plumbing only;
+  // exp-datapath consumer is wired in Phase D.
+  input  logic                        mx_enable_i,
+  input  logic [7:0]                  mx_scale_a_i,
+  input  logic [7:0]                  mx_scale_b_i,
   input  TagType                      tag_i,
   input  logic                        mask_i,
   input  AuxType                      aux_i,
@@ -44,7 +53,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   input  logic                        dp_enable_i,
   input  logic                        simd_enable_i,
   input  logic                        fp4_enable_i,
-  // Input Handshake
+  // Input Handshake a
   input  logic                        in_valid_i,
   output logic                        in_ready_o,
   input  logic                        flush_i,
@@ -73,11 +82,19 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   localparam int unsigned SUPER_EXP_BITS = SUPER_FORMAT.exp_bits; //8
   localparam int unsigned SUPER_MAN_BITS = SUPER_FORMAT.man_bits; //23
 
-  localparam int unsigned SUPER_EXP_BITS_SIMD = 5; //8
-  localparam int unsigned SUPER_MAN_BITS_SIMD = 10; //23
+  // SIMD-lane (lane 1 of the FP16-DP geometry) operand-decode widths.
+  // Sized for FP16 / BF16 — exp_bits is 8 (BF16) so that a single SIMD
+  // lane holds either an FP16 (5b exp) or BF16 (8b exp) exponent without
+  // truncation. Mantissa stays at 10b since BF16's 7b mantissa fits.
+  localparam int unsigned SUPER_EXP_BITS_SIMD = 8;
+  localparam int unsigned SUPER_MAN_BITS_SIMD = 10;
 
-  localparam int unsigned SUPER_EXP_BITS_FP8 = 4; // compatiable for both e4m3 and e5m2
-  localparam int unsigned SUPER_MAN_BITS_FP8 = 3; //
+  // FP8 lane (fp8_1 / fp8_2 — lanes 2/3 of the FP8-DP geometry) operand-decode
+  // widths. Sized for the larger of E4M3 (4-b exp) and E5M2 (5-b exp); mantissa
+  // stays at 3 b since E4M3's 3-b mantissa is the larger of the two and E5M2's
+  // 2-b mantissa fits with one zero pad bit.
+  localparam int unsigned SUPER_EXP_BITS_FP8 = 5;
+  localparam int unsigned SUPER_MAN_BITS_FP8 = 3;
 
   // Precision bits 'p' include the implicit bit
   localparam int unsigned PRECISION_BITS = SUPER_MAN_BITS + 1; //24
@@ -167,6 +184,28 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic                                         inp_pipe_simd_enable_q;
   logic                                         inp_pipe_dp_enable_q;
   logic                                         inp_pipe_fp4_enable_q;
+  fpnew_pkg::int_format_e                       inp_pipe_int_fmt_q;
+  // MX sideband (Phase A+B): plumbed but not yet consumed.
+  logic                                         inp_pipe_mx_enable_q;
+  logic [7:0]                                   inp_pipe_mx_scale_a_q;
+  logic [7:0]                                   inp_pipe_mx_scale_b_q;
+
+  // Forward-declared so the DEBUG_INT_DP $display block (further down) can
+  // reference them. Drivers and wrapper output connection live near the
+  // multiplier instantiation below.
+  logic [49:0]            product_int_dp;
+  logic                   int_op_qq;
+  fpnew_pkg::int_format_e int_fmt_qq;
+  logic [3:0]             int_prod_sign_qq;
+  logic                   src_is_fp8_qq;
+  // Phase F: INT result staging — bit-extracted product, c addend (registered to
+  // align with product_int_dp), signed sum, and the registered post-norm result.
+  logic [31:0]            operand_c_int_qq;
+  logic signed [31:0]     int_dp_extracted_qq;
+  logic signed [31:0]     int_after_mul_qq;
+  // Post-norm-stage INT signals (driven by the post_norm always_ff/comb below)
+  logic                   post_norm_int_op_q;
+  logic signed [31:0]     post_norm_int_result_q;
 
   logic mid_pipe_ready_0;
   logic ready_for_mid_pipe_qq;
@@ -191,6 +230,10 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src_fmt_i(src_fmt_i),
         .src2_fmt_i(src2_fmt_i),
         .dst_fmt_i(dst_fmt_i),
+        .int_fmt_i(int_fmt_i),
+        .mx_enable_i(mx_enable_i),
+        .mx_scale_a_i(mx_scale_a_i),
+        .mx_scale_b_i(mx_scale_b_i),
         .tag_i(tag_i),
         .mask_i(mask_i),
         .simd_enable_i(simd_enable_i),
@@ -206,6 +249,10 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src_fmt_o(src_fmt_q),
         .src2_fmt_o(src2_fmt_q),
         .dst_fmt_o(dst_fmt_q),
+        .int_fmt_o(inp_pipe_int_fmt_q),
+        .mx_enable_o(inp_pipe_mx_enable_q),
+        .mx_scale_a_o(inp_pipe_mx_scale_a_q),
+        .mx_scale_b_o(inp_pipe_mx_scale_b_q),
         .rnd_mode_o(inp_pipe_rnd_mode_q),
         .op_o(inp_pipe_op_q),
         .op_mod_o(inp_pipe_op_mod_q),
@@ -237,6 +284,10 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src_fmt_i(src_fmt_i),
         .src2_fmt_i(src2_fmt_i),
         .dst_fmt_i(dst_fmt_i),
+        .int_fmt_i(int_fmt_i),
+        .mx_enable_i(mx_enable_i),
+        .mx_scale_a_i(mx_scale_a_i),
+        .mx_scale_b_i(mx_scale_b_i),
         .tag_i(tag_i),
         .mask_i(mask_i),
         .simd_enable_i(simd_enable_i),
@@ -252,6 +303,10 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src_fmt_o(src_fmt_q),
         .src2_fmt_o(src2_fmt_q),
         .dst_fmt_o(dst_fmt_q),
+        .int_fmt_o(inp_pipe_int_fmt_q),
+        .mx_enable_o(inp_pipe_mx_enable_q),
+        .mx_scale_a_o(inp_pipe_mx_scale_a_q),
+        .mx_scale_b_o(inp_pipe_mx_scale_b_q),
         .rnd_mode_o(inp_pipe_rnd_mode_q),
         .op_o(inp_pipe_op_q),
         .op_mod_o(inp_pipe_op_mod_q),
@@ -266,7 +321,213 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     end
   endgenerate
   logic src_is_fp8;
-  assign src_is_fp8 = (src_fmt_q == fpnew_pkg::FP8) || (src_fmt_q == fpnew_pkg::FP4);
+  // FP8 (E4M3), FP8ALT (E5M2), and FP4 all use the 8-b/4-b mantissa-multiplier shape.
+  assign src_is_fp8 = (src_fmt_q == fpnew_pkg::FP8) || (src_fmt_q == fpnew_pkg::FP8ALT) || (src_fmt_q == fpnew_pkg::FP4);
+
+  // =========================================================================
+  // INT_DP_FMADD operand pre-processing (Phase D — declared, not muxed yet)
+  // =========================================================================
+  // sign-magnitude extraction per-lane and packing into the FP-mode mantissa
+  // input slots. Reuses the wrapper's existing slot geometry (FP8-DP for INT4,
+  // FP16-DP for INT8, scalar for INT16). Phase E will mux these into the
+  // wrapper inputs gated on int_op_inp.
+  logic int_op_inp;
+  assign int_op_inp = (inp_pipe_op_q == fpnew_pkg::INT_DP_FMADD);
+
+  // op_mod_i==0 → signed, op_mod_i==1 → unsigned (matches existing INT helper sidecar)
+  logic int_signed;
+  assign int_signed = ~inp_pipe_op_mod_q;
+
+  // Per-lane sign bits sourced from operand MSBs (for signed); 0 for unsigned.
+  // For INT16, only lane 0 is meaningful; for INT8 lanes 0..1; for INT4 lanes 0..3.
+  logic [3:0] int_a_sign, int_b_sign;
+  always_comb begin
+    int_a_sign = '0;
+    int_b_sign = '0;
+    unique case (inp_pipe_int_fmt_q)
+      fpnew_pkg::INT16: begin
+        int_a_sign[0] = int_signed & operands_q[0][15];
+        int_b_sign[0] = int_signed & operands_q[1][15];
+      end
+      fpnew_pkg::INT8: begin
+        int_a_sign[0] = int_signed & operands_q[0][7];
+        int_b_sign[0] = int_signed & operands_q[1][7];
+        int_a_sign[1] = int_signed & operands_q[0][15];
+        int_b_sign[1] = int_signed & operands_q[1][15];
+      end
+      fpnew_pkg::INT4: begin
+        int_a_sign[0] = int_signed & operands_q[0][3];
+        int_b_sign[0] = int_signed & operands_q[1][3];
+        int_a_sign[1] = int_signed & operands_q[0][7];
+        int_b_sign[1] = int_signed & operands_q[1][7];
+        int_a_sign[2] = int_signed & operands_q[0][11];
+        int_b_sign[2] = int_signed & operands_q[1][11];
+        int_a_sign[3] = int_signed & operands_q[0][15];
+        int_b_sign[3] = int_signed & operands_q[1][15];
+      end
+      default: begin
+        int_a_sign = '0;
+        int_b_sign = '0;
+      end
+    endcase
+  end
+
+  // Per-lane magnitudes: ~op + 1 if signed-and-negative, else op. The MIN_VAL
+  // bit pattern (e.g. 8'h80) reinterpreted as N-bit unsigned is numerically
+  // |MIN_VAL|, so no width extension is needed.
+  logic [15:0] int16_a_mag, int16_b_mag;
+  logic [7:0]  int8_a_mag  [0:1];
+  logic [7:0]  int8_b_mag  [0:1];
+  logic [3:0]  int4_a_mag  [0:3];
+  logic [3:0]  int4_b_mag  [0:3];
+
+  assign int16_a_mag = int_a_sign[0] ? (~operands_q[0][15:0] + 16'd1) : operands_q[0][15:0];
+  assign int16_b_mag = int_b_sign[0] ? (~operands_q[1][15:0] + 16'd1) : operands_q[1][15:0];
+
+  for (genvar L = 0; L < 2; L++) begin : g_int8_mag
+    assign int8_a_mag[L] = int_a_sign[L] ? (~operands_q[0][L*8 +: 8] + 8'd1)
+                                          :  operands_q[0][L*8 +: 8];
+    assign int8_b_mag[L] = int_b_sign[L] ? (~operands_q[1][L*8 +: 8] + 8'd1)
+                                          :  operands_q[1][L*8 +: 8];
+  end
+
+  for (genvar L = 0; L < 4; L++) begin : g_int4_mag
+    assign int4_a_mag[L] = int_a_sign[L] ? (~operands_q[0][L*4 +: 4] + 4'd1)
+                                          :  operands_q[0][L*4 +: 4];
+    assign int4_b_mag[L] = int_b_sign[L] ? (~operands_q[1][L*4 +: 4] + 4'd1)
+                                          :  operands_q[1][L*4 +: 4];
+  end
+
+  // Per-lane product sign (XOR of operand signs)
+  logic [3:0] int_prod_sign;
+  for (genvar L = 0; L < 4; L++) begin : g_int_prod_sign
+    assign int_prod_sign[L] = int_a_sign[L] ^ int_b_sign[L];
+  end
+
+  // INT4 lane magnitude products — replace FP4 path's y_mag in INT mode.
+  // (FP4 path computes e2m1 arithmetic in quarter-units; for INT4 we feed the
+  //  raw 8-bit unsigned product.)
+  // Width-extend operands to 8-bit so the multiply is computed at 8-bit; a
+  // 4-bit×4-bit multiply inside a concat context truncates to 4 bits.
+  logic [7:0] int4_prod_8b [0:3];
+  logic [8:0] int4_y_mag   [0:3];
+  for (genvar L = 0; L < 4; L++) begin : g_int4_y_mag
+    assign int4_prod_8b[L] = {4'b0, int4_a_mag[L]} * {4'b0, int4_b_mag[L]};
+    assign int4_y_mag[L]   = {1'b0, int4_prod_8b[L]};
+  end
+
+  // INT-mode mantissa packing — values that would feed the wrapper's mantissa
+  // inputs in Phase E. Slots determined by transdot_decomp_multiplier line ~1245:
+  //   FP8-DP (INT4): mantissa_a_i[23:20], mantissa_a_simd_i[10:7],
+  //                  mantissa_a_fp8_1_i[3:0], mantissa_a_fp8_2_i[3:0]
+  //   FP16-DP (INT8): mantissa_a_i[23:13] (11-bit lane 0),
+  //                   mantissa_a_simd_i[10:0] (11-bit lane 1)
+  //   scalar (INT16): full mantissa_a_i[23:0]
+  logic [PRECISION_BITS-1:0]      mantissa_a_int, mantissa_b_int;          // 24-bit
+  logic [PRECISION_BITS_SIMD-1:0] mantissa_a_simd_int, mantissa_b_simd_int; // 11-bit
+  logic [PRECISION_BITS_FP8-1:0]  mantissa_a_fp8_1_int, mantissa_b_fp8_1_int; // 4-bit
+  logic [PRECISION_BITS_FP8-1:0]  mantissa_a_fp8_2_int, mantissa_b_fp8_2_int; // 4-bit
+
+  always_comb begin
+    mantissa_a_int       = '0;
+    mantissa_b_int       = '0;
+    mantissa_a_simd_int  = '0;
+    mantissa_b_simd_int  = '0;
+    mantissa_a_fp8_1_int = '0;
+    mantissa_b_fp8_1_int = '0;
+    mantissa_a_fp8_2_int = '0;
+    mantissa_b_fp8_2_int = '0;
+    unique case (inp_pipe_int_fmt_q)
+      fpnew_pkg::INT16: begin
+        mantissa_a_int[15:0] = int16_a_mag;
+        mantissa_b_int[15:0] = int16_b_mag;
+      end
+      fpnew_pkg::INT8: begin
+        // lane 0 → mantissa_a_i[23:13] (11-bit slot, 8-bit mag in low 8)
+        mantissa_a_int[20:13] = int8_a_mag[0];
+        mantissa_b_int[20:13] = int8_b_mag[0];
+        // lane 1 → mantissa_a_simd_i[10:0] (11-bit slot)
+        mantissa_a_simd_int[7:0] = int8_a_mag[1];
+        mantissa_b_simd_int[7:0] = int8_b_mag[1];
+      end
+      fpnew_pkg::INT4: begin
+        // lane 0 → mantissa_a_i[23:20] (4-bit slot)
+        mantissa_a_int[23:20] = int4_a_mag[0];
+        mantissa_b_int[23:20] = int4_b_mag[0];
+        // lane 1 → mantissa_a_simd_i[10:7] (4-bit slot)
+        mantissa_a_simd_int[10:7] = int4_a_mag[1];
+        mantissa_b_simd_int[10:7] = int4_b_mag[1];
+        // lane 2 → mantissa_a_fp8_1_i[3:0] (4-bit slot)
+        mantissa_a_fp8_1_int = int4_a_mag[2];
+        mantissa_b_fp8_1_int = int4_b_mag[2];
+        // lane 3 → mantissa_a_fp8_2_i[3:0] (4-bit slot)
+        mantissa_a_fp8_2_int = int4_a_mag[3];
+        mantissa_b_fp8_2_int = int4_b_mag[3];
+      end
+      default: ;  // leave all '0
+    endcase
+  end
+
+`ifdef DEBUG_INT_DP
+  // Verification harness: dumps INT_DP_FMADD-relevant signals as they propagate.
+  // The list grows as Phase E/F adds product_int_dp_q / int_after_mul.
+  always_ff @(posedge clk_i) begin
+    if (inp_pipe_valid_q && int_op_inp) begin
+      $display("[DBG_INT_DP] t=%0t  op=%s  src_fmt=%s  int_fmt=%s  dp_en=%0b  fp4_en=%0b  signed=%0b",
+               $time, inp_pipe_op_q.name(), src_fmt_q.name(), inp_pipe_int_fmt_q.name(),
+               inp_pipe_dp_enable_q, inp_pipe_fp4_enable_q, int_signed);
+      $display("[DBG_INT_DP]   operands_q[0]=%h operands_q[1]=%h operands_q[2]=%h",
+               operands_q[0], operands_q[1], operands_q[2]);
+      $display("[DBG_INT_DP]   a_sign=%b b_sign=%b prod_sign=%b",
+               int_a_sign, int_b_sign, int_prod_sign);
+      $display("[DBG_INT_DP]   int16: a_mag=%h b_mag=%h",
+               int16_a_mag, int16_b_mag);
+      $display("[DBG_INT_DP]   int8:  a_mag={%h,%h}  b_mag={%h,%h}",
+               int8_a_mag[1], int8_a_mag[0], int8_b_mag[1], int8_b_mag[0]);
+      $display("[DBG_INT_DP]   int4:  a_mag={%h,%h,%h,%h}  b_mag={%h,%h,%h,%h}",
+               int4_a_mag[3], int4_a_mag[2], int4_a_mag[1], int4_a_mag[0],
+               int4_b_mag[3], int4_b_mag[2], int4_b_mag[1], int4_b_mag[0]);
+      $display("[DBG_INT_DP]   pack a: m_a=%h m_a_simd=%h m_a_fp8_1=%h m_a_fp8_2=%h",
+               mantissa_a_int, mantissa_a_simd_int, mantissa_a_fp8_1_int, mantissa_a_fp8_2_int);
+      $display("[DBG_INT_DP]   pack b: m_b=%h m_b_simd=%h m_b_fp8_1=%h m_b_fp8_2=%h",
+               mantissa_b_int, mantissa_b_simd_int, mantissa_b_fp8_1_int, mantissa_b_fp8_2_int);
+    end
+    if (int_op_qq) begin
+      $display("[DBG_INT_DP_QQ] t=%0t  int_fmt=%s  prod_sign=%b  src_is_fp8=%0b  product_int_dp=%h",
+               $time, int_fmt_qq.name(), int_prod_sign_qq, src_is_fp8_qq, product_int_dp);
+      $display("[DBG_INT_DP_QQ]   extracted=%0d (%h)  c=%0d (%h)  after_mul=%0d (%h)",
+               int_dp_extracted_qq, int_dp_extracted_qq,
+               $signed(operand_c_int_qq), operand_c_int_qq,
+               int_after_mul_qq, int_after_mul_qq);
+    end
+    if (post_norm_int_op_q) begin
+      $display("[DBG_INT_DP_POST] t=%0t  post_norm_int_result=%0d (%h)",
+               $time, post_norm_int_result_q, post_norm_int_result_q);
+    end
+  end
+`endif
+
+`ifdef DEBUG_MX_DP
+  // OCP MX (microscaling) verification harness. Fires whenever
+  // inp_pipe_mx_enable_q is set, dumping the scale pair and the surrounding
+  // FP4-DP / FP8-DP context. Phase D will add a second always_ff block that
+  // dumps exp_product_lane0 once the scale-add lands. Compile-gate with
+  // +define+DEBUG_MX_DP.
+  always_ff @(posedge clk_i) begin
+    if (inp_pipe_valid_q && inp_pipe_mx_enable_q) begin
+      $display("[DBG_MX_DP] t=%0t  op=%s  src_fmt=%s  dp_en=%0b  fp4_en=%0b",
+               $time, inp_pipe_op_q.name(), src_fmt_q.name(),
+               inp_pipe_dp_enable_q, inp_pipe_fp4_enable_q);
+      $display("[DBG_MX_DP]   scale_a=%0d (E8M0=2^%0d)  scale_b=%0d (E8M0=2^%0d)  combined_shift=%0d",
+               inp_pipe_mx_scale_a_q, $signed({1'b0,inp_pipe_mx_scale_a_q}) - 9'sd127,
+               inp_pipe_mx_scale_b_q, $signed({1'b0,inp_pipe_mx_scale_b_q}) - 9'sd127,
+               $signed({1'b0,inp_pipe_mx_scale_a_q}) + $signed({1'b0,inp_pipe_mx_scale_b_q}) - 10'sd254);
+      $display("[DBG_MX_DP]   operands_q[0]=%h operands_q[1]=%h operands_q[2]=%h",
+               operands_q[0], operands_q[1], operands_q[2]);
+    end
+  end
+`endif
+
   // -----------------
   // Input processing
   // -----------------
@@ -300,8 +561,17 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         assign trimmed_ops[op]       = operands_q[op][FP_WIDTH-1:0];
         assign fmt_sign[fmt][op]     = operands_q[op][FP_WIDTH-1];
         assign fmt_exponent[fmt][op] = signed'({1'b0, operands_q[op][MAN_BITS+:EXP_BITS]});
-        assign fmt_mantissa[fmt][op] = {info_q[fmt][op].is_normal, operands_q[op][MAN_BITS-1:0]} <<
-                                       (SUPER_MAN_BITS - MAN_BITS); // move to left of mantissa
+        if (fmt == fpnew_pkg::FP8ALT) begin : g_man_fp8alt_pad
+          // FP8ALT (E5M2) shares FP8 (E4M3)'s downstream bit layout — pad the
+          // 2-b explicit mantissa with one trailing 0 so it occupies the same
+          // bit positions as E4M3's 3-b mantissa. No information loss; just
+          // means the LSB of the 3-b "effective" mantissa is always 0.
+          assign fmt_mantissa[fmt][op] = {info_q[fmt][op].is_normal, operands_q[op][MAN_BITS-1:0], 1'b0} <<
+                                         (SUPER_MAN_BITS - MAN_BITS - 1);
+        end else begin : g_man_default
+          assign fmt_mantissa[fmt][op] = {info_q[fmt][op].is_normal, operands_q[op][MAN_BITS-1:0]} <<
+                                         (SUPER_MAN_BITS - MAN_BITS); // move to left of mantissa
+        end
       end
     end else begin : inactive_format
       assign info_q[fmt]                 = '{default: fpnew_pkg::DONT_CARE}; // format disabled
@@ -330,7 +600,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     localparam int unsigned EXP_BITS = fpnew_pkg::exp_bits(fpnew_pkg::fp_format_e'(fmt));
     localparam int unsigned MAN_BITS = fpnew_pkg::man_bits(fpnew_pkg::fp_format_e'(fmt));
 
-    if (fmt==fpnew_pkg::FP16 || fmt==fpnew_pkg::FP8) begin : active_format // only fp16 and fp8
+    if (fmt==fpnew_pkg::FP16 || fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP16ALT || fmt==fpnew_pkg::FP8ALT) begin : active_format // FP16 / BF16 / FP8 (E4M3) / FP8ALT (E5M2) ride this SIMD-lane decode
       localparam fpnew_pkg::fp_format_e FpFormat = fpnew_pkg::fp_format_e'(fmt);
       logic [2:0][FP_WIDTH-1:0] trimmed_ops;
 
@@ -347,8 +617,14 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         assign trimmed_ops[op]       = operands_q_simd[op][FP_WIDTH-1:0];
         assign fmt_sign_simd[fmt][op]     = operands_q_simd[op][FP_WIDTH-1];
         assign fmt_exponent_simd[fmt][op] = signed'({1'b0, operands_q_simd[op][MAN_BITS+:EXP_BITS]});
-        assign fmt_mantissa_simd[fmt][op] = {info_q_simd[fmt][op].is_normal, operands_q_simd[op][MAN_BITS-1:0]} <<
-                                       (SUPER_MAN_BITS_SIMD - MAN_BITS); // move to left of mantissa
+        if (fmt == fpnew_pkg::FP8ALT) begin : g_man_fp8alt_pad
+          // E5M2 → pad to FP8 (E4M3) layout in this lane.
+          assign fmt_mantissa_simd[fmt][op] = {info_q_simd[fmt][op].is_normal, operands_q_simd[op][MAN_BITS-1:0], 1'b0} <<
+                                              (SUPER_MAN_BITS_SIMD - MAN_BITS - 1);
+        end else begin : g_man_default
+          assign fmt_mantissa_simd[fmt][op] = {info_q_simd[fmt][op].is_normal, operands_q_simd[op][MAN_BITS-1:0]} <<
+                                              (SUPER_MAN_BITS_SIMD - MAN_BITS); // move to left of mantissa
+        end
       end
     end else begin : inactive_format
       assign info_q_simd[fmt]                 = '{default: fpnew_pkg::DONT_CARE}; // format disabled
@@ -378,7 +654,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     localparam int unsigned EXP_BITS = fpnew_pkg::exp_bits(fpnew_pkg::fp_format_e'(fmt));
     localparam int unsigned MAN_BITS = fpnew_pkg::man_bits(fpnew_pkg::fp_format_e'(fmt));
 
-    if (fmt==fpnew_pkg::FP8) begin : active_format // only fp8
+    if (fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP8ALT) begin : active_format // FP8 (E4M3) and FP8ALT (E5M2) ride this FP8-DP lane decode
       localparam fpnew_pkg::fp_format_e FpFormat = fpnew_pkg::fp_format_e'(fmt);
       logic [2:0][FP_WIDTH-1:0] trimmed_ops;
 
@@ -395,8 +671,14 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         assign trimmed_ops[op]       = operands_q_fp8_1[op][FP_WIDTH-1:0];
         assign fmt_sign_fp8_1[fmt][op]     = operands_q_fp8_1[op][FP_WIDTH-1];
         assign fmt_exponent_fp8_1[fmt][op] = signed'({1'b0, operands_q_fp8_1[op][MAN_BITS+:EXP_BITS]});
-        assign fmt_mantissa_fp8_1[fmt][op] = {info_q_fp8_1[fmt][op].is_normal, operands_q_fp8_1[op][MAN_BITS-1:0]} <<
-                                       (SUPER_MAN_BITS_FP8 - MAN_BITS); // move to left of mantissa
+        if (fmt == fpnew_pkg::FP8ALT) begin : g_man_fp8alt_pad
+          // E5M2 → pad to FP8 (E4M3) layout in this fp8_1 lane.
+          assign fmt_mantissa_fp8_1[fmt][op] = {info_q_fp8_1[fmt][op].is_normal, operands_q_fp8_1[op][MAN_BITS-1:0], 1'b0} <<
+                                               (SUPER_MAN_BITS_FP8 - MAN_BITS - 1);
+        end else begin : g_man_default
+          assign fmt_mantissa_fp8_1[fmt][op] = {info_q_fp8_1[fmt][op].is_normal, operands_q_fp8_1[op][MAN_BITS-1:0]} <<
+                                               (SUPER_MAN_BITS_FP8 - MAN_BITS); // move to left of mantissa
+        end
       end
     end else begin : inactive_format
       assign info_q_fp8_1[fmt]                 = '{default: fpnew_pkg::DONT_CARE}; // format disabled
@@ -425,7 +707,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     localparam int unsigned EXP_BITS = fpnew_pkg::exp_bits(fpnew_pkg::fp_format_e'(fmt));
     localparam int unsigned MAN_BITS = fpnew_pkg::man_bits(fpnew_pkg::fp_format_e'(fmt));
 
-    if (fmt==fpnew_pkg::FP8) begin : active_format // only fp8
+    if (fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP8ALT) begin : active_format // FP8 (E4M3) and FP8ALT (E5M2) ride this FP8-DP lane decode
       localparam fpnew_pkg::fp_format_e FpFormat = fpnew_pkg::fp_format_e'(fmt);
       logic [2:0][FP_WIDTH-1:0] trimmed_ops;
 
@@ -442,8 +724,14 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         assign trimmed_ops[op]       = operands_q_fp8_2[op][FP_WIDTH-1:0];
         assign fmt_sign_fp8_2[fmt][op]     = operands_q_fp8_2[op][FP_WIDTH-1];
         assign fmt_exponent_fp8_2[fmt][op] = signed'({1'b0, operands_q_fp8_2[op][MAN_BITS+:EXP_BITS]});
-        assign fmt_mantissa_fp8_2[fmt][op] = {info_q_fp8_2[fmt][op].is_normal, operands_q_fp8_2[op][MAN_BITS-1:0]} <<
-                                       (SUPER_MAN_BITS_FP8 - MAN_BITS); // move to left of mantissa
+        if (fmt == fpnew_pkg::FP8ALT) begin : g_man_fp8alt_pad
+          // E5M2 → pad to FP8 (E4M3) layout in this fp8_2 lane.
+          assign fmt_mantissa_fp8_2[fmt][op] = {info_q_fp8_2[fmt][op].is_normal, operands_q_fp8_2[op][MAN_BITS-1:0], 1'b0} <<
+                                               (SUPER_MAN_BITS_FP8 - MAN_BITS - 1);
+        end else begin : g_man_default
+          assign fmt_mantissa_fp8_2[fmt][op] = {info_q_fp8_2[fmt][op].is_normal, operands_q_fp8_2[op][MAN_BITS-1:0]} <<
+                                               (SUPER_MAN_BITS_FP8 - MAN_BITS); // move to left of mantissa
+        end
       end
     end else begin : inactive_format
       assign info_q_fp8_2[fmt]                 = '{default: fpnew_pkg::DONT_CARE}; // format disabled
@@ -898,6 +1186,11 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .simd_enable_i   ( inp_pipe_simd_enable_q ),
     .fp4_enable_i   ( inp_pipe_fp4_enable_q ),
 
+    // OCP MX scale folded into exp_product_lane0 inside the exp datapath.
+    .mx_enable_i    ( inp_pipe_mx_enable_q  ),
+    .mx_scale_a_i   ( inp_pipe_mx_scale_a_q ),
+    .mx_scale_b_i   ( inp_pipe_mx_scale_b_q ),
+
     .exponent_addend_o(exponent_addend),
     .exponent_product_o(exponent_product),
     .exponent_difference_o(exponent_difference),
@@ -1030,6 +1323,12 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   assign tentative_sign_lane2 = inp_pipe_fp4_enable_q ? y_sign[2] : tentative_sign_fp8_1;
   assign tentative_sign_lane3 = inp_pipe_fp4_enable_q ? y_sign[3] : tentative_sign_fp8_2;
 
+  // Phase E: per-input mux selects INT operand packing when int_op_inp is set,
+  // else passes the FP-path signals through unchanged. shamts forced to zero
+  // for INT (no exponent shift). product_int_dp_o (registered via pipe_qq_en
+  // inside the wrapper) is exposed as product_int_dp for Phase F.
+  // (declarations of product_int_dp / int_*_qq are at the top of the module)
+
   transdot_decomp_multiplier_w6_direct_outputs #(
     .PRECISION_BITS      ( PRECISION_BITS ),
     .PRECISION_BITS_SIMD ( PRECISION_BITS_SIMD ),
@@ -1041,30 +1340,64 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .simd_enable_i         ( inp_pipe_simd_enable_q ),
     .fp4_enable_i          ( inp_pipe_fp4_enable_q ),
     .src_is_fp8_i          ( src_is_fp8 ),
-    .shamt_lane0_i         ( dp_shamt0[5:0] ),
-    .shamt_lane1_i         ( dp_shamt1[5:0] ),
-    .shamt_lane2_i         ( dp_shamt2[4:0] ),
-    .shamt_lane3_i         ( dp_shamt3[4:0] ),
-    .tentative_sign_lane0_i( tentative_sign_lane0 ),
-    .tentative_sign_lane1_i( tentative_sign_lane1 ),
-    .tentative_sign_lane2_i( tentative_sign_lane2 ),
-    .tentative_sign_lane3_i( tentative_sign_lane3 ),
-    .fp4_y_mag0_i          ( y_mag[0] ),
-    .fp4_y_mag1_i          ( y_mag[1] ),
-    .fp4_y_mag2_i          ( y_mag[2] ),
-    .fp4_y_mag3_i          ( y_mag[3] ),
-    .mantissa_a_i          ( mantissa_a ),
-    .mantissa_b_i          ( mantissa_b ),
-    .mantissa_a_simd_i     ( mantissa_a_simd ),
-    .mantissa_b_simd_i     ( mantissa_b_simd ),
-    .mantissa_a_fp8_1_i    ( mantissa_a_fp8_1 ),
-    .mantissa_b_fp8_1_i    ( mantissa_b_fp8_1 ),
-    .mantissa_a_fp8_2_i    ( mantissa_a_fp8_2 ),
-    .mantissa_b_fp8_2_i    ( mantissa_b_fp8_2 ),
+    .shamt_lane0_i         ( int_op_inp ? 6'd0 : dp_shamt0[5:0] ),
+    .shamt_lane1_i         ( int_op_inp ? 6'd0 : dp_shamt1[5:0] ),
+    .shamt_lane2_i         ( int_op_inp ? 5'd0 : dp_shamt2[4:0] ),
+    .shamt_lane3_i         ( int_op_inp ? 5'd0 : dp_shamt3[4:0] ),
+    .tentative_sign_lane0_i( int_op_inp ? int_prod_sign[0] : tentative_sign_lane0 ),
+    .tentative_sign_lane1_i( int_op_inp ? int_prod_sign[1] : tentative_sign_lane1 ),
+    .tentative_sign_lane2_i( int_op_inp ? int_prod_sign[2] : tentative_sign_lane2 ),
+    .tentative_sign_lane3_i( int_op_inp ? int_prod_sign[3] : tentative_sign_lane3 ),
+    .fp4_y_mag0_i          ( int_op_inp ? int4_y_mag[0] : y_mag[0] ),
+    .fp4_y_mag1_i          ( int_op_inp ? int4_y_mag[1] : y_mag[1] ),
+    .fp4_y_mag2_i          ( int_op_inp ? int4_y_mag[2] : y_mag[2] ),
+    .fp4_y_mag3_i          ( int_op_inp ? int4_y_mag[3] : y_mag[3] ),
+    .mantissa_a_i          ( int_op_inp ? mantissa_a_int       : mantissa_a ),
+    .mantissa_b_i          ( int_op_inp ? mantissa_b_int       : mantissa_b ),
+    .mantissa_a_simd_i     ( int_op_inp ? mantissa_a_simd_int  : mantissa_a_simd ),
+    .mantissa_b_simd_i     ( int_op_inp ? mantissa_b_simd_int  : mantissa_b_simd ),
+    .mantissa_a_fp8_1_i    ( int_op_inp ? mantissa_a_fp8_1_int : mantissa_a_fp8_1 ),
+    .mantissa_b_fp8_1_i    ( int_op_inp ? mantissa_b_fp8_1_int : mantissa_b_fp8_1 ),
+    .mantissa_a_fp8_2_i    ( int_op_inp ? mantissa_a_fp8_2_int : mantissa_a_fp8_2 ),
+    .mantissa_b_fp8_2_i    ( int_op_inp ? mantissa_b_fp8_2_int : mantissa_b_fp8_2 ),
     .product_comb_o        ( product_comb ),
     .product_dp_o          ( product_dp_comb ),
-    .tentative_sign_dp_o   ( tentative_sign_dp )
+    .tentative_sign_dp_o   ( tentative_sign_dp ),
+    .product_int_dp_o      ( product_int_dp )
   );
+
+  // Registered (qq-stage) snapshots for the harness — aligned with product_int_dp.
+  always_ff @(posedge clk_i) begin
+    if (pipe_qq_en) begin
+      int_op_qq        <= int_op_inp;
+      int_fmt_qq       <= inp_pipe_int_fmt_q;
+      int_prod_sign_qq <= int_prod_sign;
+      src_is_fp8_qq    <= src_is_fp8;
+      operand_c_int_qq <= operands_q[2];   // INT32 accumulator passes through unchanged
+    end
+  end
+
+  // Bit-extract the per-format INT product from the wrapper's signed 50-bit
+  // final_sum. The window must be wide enough to hold the sum-across-lanes
+  // *plus one bit* — for INT8 with 2 lanes max abs sum is +32768, which is
+  // 17-bit signed (16-bit signed range only reaches +32767).
+  //   INT8  → 17-bit signed at [40:24] (2 lanes)
+  //   INT4  → 11-bit signed at [47:37] (4 lanes — max sum ±256 fits)
+  //   INT16 → 32-bit unsigned at [31:0]; sign applied externally
+  always_comb begin
+    unique case (int_fmt_qq)
+      fpnew_pkg::INT16: int_dp_extracted_qq = int_prod_sign_qq[0]
+                                              ? -$signed({1'b0, product_int_dp[31:0]})
+                                              :  $signed({1'b0, product_int_dp[31:0]});
+      fpnew_pkg::INT8:  int_dp_extracted_qq = $signed({{15{product_int_dp[40]}},
+                                                       product_int_dp[40:24]});
+      fpnew_pkg::INT4:  int_dp_extracted_qq = $signed({{21{product_int_dp[47]}},
+                                                       product_int_dp[47:37]});
+      default:          int_dp_extracted_qq = '0;
+    endcase
+  end
+
+  assign int_after_mul_qq = int_dp_extracted_qq + $signed(operand_c_int_qq);
 
   logic signed [EXP_WIDTH-1:0] large_exp_product;
   assign large_exp_product = exponent_product;
@@ -1379,6 +1712,9 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic                  [0:NUM_MID_REGS]                         mid_pipe_simd_enable_q;
   AuxType                [0:NUM_MID_REGS]                         mid_pipe_aux_q;
   logic                  [0:NUM_MID_REGS]                         mid_pipe_valid_q;
+  // INT path mid_pipe (Phase F)
+  logic                  [0:NUM_MID_REGS]                         mid_pipe_int_op_q;
+  logic signed           [0:NUM_MID_REGS][31:0]                   mid_pipe_int_result_q;
   // Ready signal is combinatorial for all stages
   logic [0:NUM_MID_REGS] mid_pipe_ready;
 
@@ -1401,6 +1737,8 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   assign mid_pipe_simd_enable_q[0] = simd_enable_qq;
   assign mid_pipe_aux_q[0]         = aux_qq;
   assign mid_pipe_valid_q[0]       = inp_pipe_valid_qq;
+  assign mid_pipe_int_op_q[0]      = int_op_qq;
+  assign mid_pipe_int_result_q[0]  = int_after_mul_qq;
   // Input stage: Propagate pipeline ready signal to input pipe
   assign mid_pipe_ready_0 = mid_pipe_ready[0];
   // Generate the register stages
@@ -1433,6 +1771,8 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     `FFL(mid_pipe_mask_q[i+1],        mid_pipe_mask_q[i],        reg_ena, '0)
     `FFL(mid_pipe_simd_enable_q[i+1], mid_pipe_simd_enable_q[i], reg_ena, '0)
     `FFL(mid_pipe_aux_q[i+1],         mid_pipe_aux_q[i],         reg_ena, AuxType'('0))
+    `FFL(mid_pipe_int_op_q[i+1],      mid_pipe_int_op_q[i],      reg_ena, 1'b0)
+    `FFL(mid_pipe_int_result_q[i+1],  mid_pipe_int_result_q[i],  reg_ena, '0)
   end
   // Output stage: assign selected pipe outputs to signals for later use
   assign effective_subtraction_q = mid_pipe_eff_sub_q[NUM_MID_REGS];
@@ -1707,7 +2047,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .SHIFT_AMOUNT_WIDTH_FP8(SHIFT_AMOUNT_WIDTH_FP8)
   ) i_transdot_normalization_stage (
     .simd_enable_i         (simd_enable_q),
-    .is_fp8                (dst_fmt_q2 == fpnew_pkg::FP8),
+    .is_fp8                ((dst_fmt_q2 == fpnew_pkg::FP8) || (dst_fmt_q2 == fpnew_pkg::FP8ALT)),
     .sum_i                 (sum_q),
     .exponent_product_i    (exponent_product_q),
     .exponent_difference_i (exponent_difference_q),
@@ -1782,6 +2122,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic                        result_is_special_post_q;
   fp_t                         special_result_post_q;
   fpnew_pkg::status_t          special_status_post_q;
+  // (post_norm_int_op_q / post_norm_int_result_q forward-declared at module top.)
 
   logic [PRECISION_BITS_SIMD:0]     final_mantissa_post_q_simd;
   logic [2*PRECISION_BITS_SIMD+2:0] sum_sticky_bits_post_q_simd;
@@ -1874,6 +2215,8 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
           post_norm_tag_q                 <= TagType'('0);
           post_norm_mask_q                <= 1'b0;
           post_norm_aux_q                 <= AuxType'('0);
+          post_norm_int_op_q              <= 1'b0;
+          post_norm_int_result_q          <= '0;
         end else if (post_norm_pipe_en) begin
           final_mantissa_post_q          <= final_mantissa;
           sum_sticky_bits_post_q         <= sum_sticky_bits;
@@ -1921,6 +2264,8 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
           post_norm_tag_q                 <= mid_pipe_tag_q[NUM_MID_REGS];
           post_norm_mask_q                <= mid_pipe_mask_q[NUM_MID_REGS];
           post_norm_aux_q                 <= mid_pipe_aux_q[NUM_MID_REGS];
+          post_norm_int_op_q              <= mid_pipe_int_op_q[NUM_MID_REGS];
+          post_norm_int_result_q          <= mid_pipe_int_result_q[NUM_MID_REGS];
         end
       end
 
@@ -1981,15 +2326,19 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         special_result_post_q_fp8_2        = special_result_q_fp8_2;
         special_status_post_q_fp8_2        = special_status_q_fp8_2;
 
-        post_norm_tag_q   = mid_pipe_tag_q[NUM_MID_REGS];
-        post_norm_mask_q  = mid_pipe_mask_q[NUM_MID_REGS];
-        post_norm_aux_q   = mid_pipe_aux_q[NUM_MID_REGS];
-        post_norm_valid_q = mid_pipe_valid_q[NUM_MID_REGS];
+        post_norm_tag_q          = mid_pipe_tag_q[NUM_MID_REGS];
+        post_norm_mask_q         = mid_pipe_mask_q[NUM_MID_REGS];
+        post_norm_aux_q          = mid_pipe_aux_q[NUM_MID_REGS];
+        post_norm_valid_q        = mid_pipe_valid_q[NUM_MID_REGS];
+        post_norm_int_op_q       = mid_pipe_int_op_q[NUM_MID_REGS];
+        post_norm_int_result_q   = mid_pipe_int_result_q[NUM_MID_REGS];
       end
     end
   endgenerate
 
-  assign dst_is_fp8 = (dst_fmt_post_q == fpnew_pkg::FP8);
+  // 8-b destination shape for the SIMD/DP combine path. Both FP8 (E4M3) and
+  // FP8ALT (E5M2) pack 4 lanes of 8-b into the 32-b output word.
+  assign dst_is_fp8 = (dst_fmt_post_q == fpnew_pkg::FP8) || (dst_fmt_post_q == fpnew_pkg::FP8ALT);
 
   // ----------------------------
   // Rounding and classification
@@ -2038,7 +2387,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .SUPER_EXP_BITS(SUPER_EXP_BITS_SIMD), 
     .SUPER_MAN_BITS(SUPER_MAN_BITS_SIMD),
     .NUM_FORMATS(NUM_FORMATS),
-    .FpFmtConfig(FpFmtConfig & (6'b001110))
+    .FpFmtConfig(FpFmtConfig & (7'b0011101))   // SIMD lane: FP16 + FP8 + FP16ALT (BF16) + FP8ALT (E5M2)
   ) i_round_classify_stage_simd (
     .final_exponent_i       (final_exponent_post_q_simd),
     .final_mantissa_i       (final_mantissa_post_q_simd),
@@ -2069,7 +2418,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .SUPER_EXP_BITS(SUPER_EXP_BITS_FP8), 
     .SUPER_MAN_BITS(SUPER_MAN_BITS_FP8),
     .NUM_FORMATS(NUM_FORMATS),
-    .FpFmtConfig(FpFmtConfig & (6'b000100))
+    .FpFmtConfig(FpFmtConfig & (7'b0001001))   // FP8-DP lane: FP8 + FP8ALT
   ) i_round_classify_stage_fp8_1 (
     .final_exponent_i       (final_exponent_post_q_fp8_1),
     .final_mantissa_i       (final_mantissa_post_q_fp8_1),
@@ -2100,7 +2449,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .SUPER_EXP_BITS(SUPER_EXP_BITS_FP8), 
     .SUPER_MAN_BITS(SUPER_MAN_BITS_FP8),
     .NUM_FORMATS(NUM_FORMATS),
-    .FpFmtConfig(FpFmtConfig & (6'b000100))
+    .FpFmtConfig(FpFmtConfig & (7'b0001001))   // FP8-DP lane: FP8 + FP8ALT
   ) i_round_classify_stage_fp8_2 (
     .final_exponent_i       (final_exponent_post_q_fp8_2),
     .final_mantissa_i       (final_mantissa_post_q_fp8_2),
@@ -2199,7 +2548,10 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   fpnew_pkg::status_t status_d;
   fpnew_pkg::status_t status_d_simd_merged;
 
-  assign result_d = simd_enable_post_q ? (dst_is_fp8? {result_d_fp8_2, result_d_simd[0+: WIDTH/4],result_d_fp8_1,result_d_normal[0+: WIDTH/4]} :{result_d_simd, result_d_normal[0 +: WIDTH/2]}) : result_d_normal;
+  // Phase F: INT result overrides FP result_d when post_norm_int_op_q is set.
+  logic [WIDTH-1:0] result_d_fp;
+  assign result_d_fp = simd_enable_post_q ? (dst_is_fp8? {result_d_fp8_2, result_d_simd[0+: WIDTH/4],result_d_fp8_1,result_d_normal[0+: WIDTH/4]} :{result_d_simd, result_d_normal[0 +: WIDTH/2]}) : result_d_normal;
+  assign result_d = post_norm_int_op_q ? post_norm_int_result_q : result_d_fp;
   assign status_d_simd_merged = dst_is_fp8
       ? (status_d_fp8_2 | status_d_simd | status_d_fp8_1 | status_d_normal)
       : (status_d_simd | status_d_normal);
@@ -2315,6 +2667,10 @@ module transdot_input_pipeline_skip #(
   input  fpnew_pkg::fp_format_e         src_fmt_i,
   input  fpnew_pkg::fp_format_e         src2_fmt_i,
   input  fpnew_pkg::fp_format_e         dst_fmt_i,
+  input  fpnew_pkg::int_format_e        int_fmt_i,
+  input  logic                          mx_enable_i,
+  input  logic [7:0]                    mx_scale_a_i,
+  input  logic [7:0]                    mx_scale_b_i,
   input  TagType                        tag_i,
   input  logic                          mask_i,
   input  logic                          simd_enable_i,
@@ -2336,6 +2692,10 @@ module transdot_input_pipeline_skip #(
   output fpnew_pkg::fp_format_e         src_fmt_o,
   output fpnew_pkg::fp_format_e         src2_fmt_o,
   output fpnew_pkg::fp_format_e         dst_fmt_o,
+  output fpnew_pkg::int_format_e        int_fmt_o,
+  output logic                          mx_enable_o,
+  output logic [7:0]                    mx_scale_a_o,
+  output logic [7:0]                    mx_scale_b_o,
   output fpnew_pkg::roundmode_e         rnd_mode_o,
   output fpnew_pkg::operation_e         op_o,
   output logic                          op_mod_o,
@@ -2348,11 +2708,15 @@ module transdot_input_pipeline_skip #(
   output logic                          valid_o
 );
 
-  assign operands_o = operands_i; // bypass operands directly 
-  assign is_boxed_o = is_boxed_i; // bypass is_boxed directly 
+  assign operands_o = operands_i; // bypass operands directly
+  assign is_boxed_o = is_boxed_i; // bypass is_boxed directly
   assign src_fmt_o  = src_fmt_i;
   assign src2_fmt_o = src2_fmt_i;
   assign dst_fmt_o  = dst_fmt_i;
+  assign int_fmt_o  = int_fmt_i;
+  assign mx_enable_o  = mx_enable_i;
+  assign mx_scale_a_o = mx_scale_a_i;
+  assign mx_scale_b_o = mx_scale_b_i;
   assign rnd_mode_o = rnd_mode_i;
   assign op_o       = op_i;
   assign op_mod_o   = op_mod_i;
@@ -2388,6 +2752,10 @@ module transdot_input_pipeline #(
   input  fpnew_pkg::fp_format_e         src_fmt_i,
   input  fpnew_pkg::fp_format_e         src2_fmt_i,
   input  fpnew_pkg::fp_format_e         dst_fmt_i,
+  input  fpnew_pkg::int_format_e        int_fmt_i,
+  input  logic                          mx_enable_i,
+  input  logic [7:0]                    mx_scale_a_i,
+  input  logic [7:0]                    mx_scale_b_i,
   input  TagType                        tag_i,
   input  logic                          mask_i,
   input  logic                          simd_enable_i,
@@ -2409,6 +2777,10 @@ module transdot_input_pipeline #(
   output fpnew_pkg::fp_format_e         src_fmt_o,
   output fpnew_pkg::fp_format_e         src2_fmt_o,
   output fpnew_pkg::fp_format_e         dst_fmt_o,
+  output fpnew_pkg::int_format_e        int_fmt_o,
+  output logic                          mx_enable_o,
+  output logic [7:0]                    mx_scale_a_o,
+  output logic [7:0]                    mx_scale_b_o,
   output fpnew_pkg::roundmode_e         rnd_mode_o,
   output fpnew_pkg::operation_e         op_o,
   output logic                          op_mod_o,
@@ -2432,6 +2804,10 @@ module transdot_input_pipeline #(
   fpnew_pkg::fp_format_e [0:NUM_INP_REGS]                       inp_pipe_src_fmt_q;
   fpnew_pkg::fp_format_e [0:NUM_INP_REGS]                       inp_pipe_src2_fmt_q;
   fpnew_pkg::fp_format_e [0:NUM_INP_REGS]                       inp_pipe_dst_fmt_q;
+  fpnew_pkg::int_format_e [0:NUM_INP_REGS]                      inp_pipe_int_fmt_q;
+  logic                  [0:NUM_INP_REGS]                       inp_pipe_mx_enable_q;
+  logic                  [0:NUM_INP_REGS][7:0]                  inp_pipe_mx_scale_a_q;
+  logic                  [0:NUM_INP_REGS][7:0]                  inp_pipe_mx_scale_b_q;
   TagType                [0:NUM_INP_REGS]                       inp_pipe_tag_q;
   logic                  [0:NUM_INP_REGS]                       inp_pipe_mask_q;
   logic                  [0:NUM_INP_REGS]                       inp_pipe_simd_enable_q;
@@ -2450,6 +2826,10 @@ module transdot_input_pipeline #(
   assign inp_pipe_src_fmt_q[0]  = src_fmt_i;
   assign inp_pipe_src2_fmt_q[0] = src2_fmt_i;
   assign inp_pipe_dst_fmt_q[0]  = dst_fmt_i;
+  assign inp_pipe_int_fmt_q[0]  = int_fmt_i;
+  assign inp_pipe_mx_enable_q[0]  = mx_enable_i;
+  assign inp_pipe_mx_scale_a_q[0] = mx_scale_a_i;
+  assign inp_pipe_mx_scale_b_q[0] = mx_scale_b_i;
   assign inp_pipe_tag_q[0]      = tag_i;
   assign inp_pipe_mask_q[0]     = mask_i;
   assign inp_pipe_simd_enable_q[0] = simd_enable_i;
@@ -2489,6 +2869,10 @@ module transdot_input_pipeline #(
     `FFL(inp_pipe_src_fmt_q[i+1],  inp_pipe_src_fmt_q[i],  reg_ena, fpnew_pkg::fp_format_e'(0))
     `FFL(inp_pipe_src2_fmt_q[i+1], inp_pipe_src2_fmt_q[i], reg_ena, fpnew_pkg::fp_format_e'(0))
     `FFL(inp_pipe_dst_fmt_q[i+1],  inp_pipe_dst_fmt_q[i],  reg_ena, fpnew_pkg::fp_format_e'(0))
+    `FFL(inp_pipe_int_fmt_q[i+1],  inp_pipe_int_fmt_q[i],  reg_ena, fpnew_pkg::int_format_e'(0))
+    `FFL(inp_pipe_mx_enable_q[i+1],  inp_pipe_mx_enable_q[i],  reg_ena, 1'b0)
+    `FFL(inp_pipe_mx_scale_a_q[i+1], inp_pipe_mx_scale_a_q[i], reg_ena, 8'd0)
+    `FFL(inp_pipe_mx_scale_b_q[i+1], inp_pipe_mx_scale_b_q[i], reg_ena, 8'd0)
     `FFL(inp_pipe_tag_q[i+1],      inp_pipe_tag_q[i],      reg_ena, TagType'('0))
     `FFL(inp_pipe_mask_q[i+1],     inp_pipe_mask_q[i],     reg_ena, '0)
     `FFL(inp_pipe_simd_enable_q[i+1], inp_pipe_simd_enable_q[i], reg_ena, 1'b0)
@@ -2505,6 +2889,10 @@ module transdot_input_pipeline #(
   assign src_fmt_o  = inp_pipe_src_fmt_q[NUM_INP_REGS];
   assign src2_fmt_o = inp_pipe_src2_fmt_q[NUM_INP_REGS];
   assign dst_fmt_o  = inp_pipe_dst_fmt_q[NUM_INP_REGS];
+  assign int_fmt_o  = inp_pipe_int_fmt_q[NUM_INP_REGS];
+  assign mx_enable_o  = inp_pipe_mx_enable_q[NUM_INP_REGS];
+  assign mx_scale_a_o = inp_pipe_mx_scale_a_q[NUM_INP_REGS];
+  assign mx_scale_b_o = inp_pipe_mx_scale_b_q[NUM_INP_REGS];
   assign rnd_mode_o = inp_pipe_rnd_mode_q[NUM_INP_REGS];
   assign op_o       = inp_pipe_op_q[NUM_INP_REGS];
   assign op_mod_o   = inp_pipe_op_mod_q[NUM_INP_REGS];
@@ -2713,7 +3101,7 @@ endmodule
 
 module fpnew_special_results #(
   parameter int unsigned NUM_FORMATS     = fpnew_pkg::NUM_FP_FORMATS,          // number of supported formats
-  parameter fpnew_pkg::fmt_logic_t FpFmtConfig = 6'b101101, // enable mask per format
+  parameter fpnew_pkg::fmt_logic_t FpFmtConfig = 7'b1011010, // enable mask per format
   localparam int unsigned WIDTH       = fpnew_pkg::max_fp_width(FpFmtConfig)
 )(
   // ---------------- Inputs ----------------
@@ -3219,7 +3607,7 @@ module fpnew_round_classify_stage #(
   parameter int unsigned SUPER_EXP_BITS  = 15,   // full pipeline exponent width
   parameter int unsigned SUPER_MAN_BITS  = 64,   // full pipeline mantissa width
   parameter int unsigned NUM_FORMATS     = fpnew_pkg::NUM_FP_FORMATS,
-  parameter fpnew_pkg::fmt_logic_t      FpFmtConfig = 6'b101101
+  parameter fpnew_pkg::fmt_logic_t      FpFmtConfig = 7'b1011010
 )(
   // ---------------- Inputs ----------------
   input  logic signed [EXP_WIDTH-1:0]    final_exponent_i,

@@ -95,6 +95,10 @@ transdot_fpu_top #(
 .src_fmt_i,
 .dst_fmt_i,
 .int_fmt_i,
+// MX sideband — TB doesn't exercise MX yet; tie off.
+.mx_enable_i (1'b0),
+.mx_scale_a_i(8'd0),
+.mx_scale_b_i(8'd0),
 .vectorial_op_i,
 .simd_mask_i,
 .tag_i,
@@ -182,8 +186,8 @@ function automatic real bits_to_real(input fp_format_e fmt, input logic [31:0] b
   if (fmt == FP32) begin
     return $bitstoshortreal(raw);
   end
-  else if (fmt == FP16 || fmt == FP16ALT) begin
-    // Decode IEEE-754 binary16 (e5m10)
+  else if (fmt == FP16) begin
+    // IEEE-754 binary16 (e5m10), bias = 15
     logic        s = raw[15];
     logic [4:0]  e = raw[14:10];
     logic [9:0]  m = raw[9:0];
@@ -198,8 +202,24 @@ function automatic real bits_to_real(input fp_format_e fmt, input logic [31:0] b
       return sign * (1.0 + m / 1024.0) * pow2((int'(e) - 15));
     end
   end
-  else if (src_fmt_i == FP8) begin
-    // Decode a simple FP8 e4m3 (no subnormal handling nuance)
+  else if (fmt == FP16ALT) begin
+    // bfloat16 (e8m7), bias = 127
+    logic        s = raw[15];
+    logic [7:0]  e = raw[14:7];
+    logic [6:0]  m = raw[6:0];
+    real sign = s ? -1.0 : 1.0;
+    if (e == 8'b11111111) begin
+      if (m == 0) return sign * (1.0/0.0); // inf
+      else        return 0.0/0.0;          // NaN
+    end else if (e == 8'b00000000) begin
+      if (m == 0) return sign * 0.0;       // zero
+      else        return sign * (m / 128.0) * pow2(-126);
+    end else begin
+      return sign * (1.0 + m / 128.0) * pow2((int'(e) - 127));
+    end
+  end
+  else if (fmt == FP8) begin
+    // FP8 E4M3, bias = 7
     logic        s = raw[7];
     logic [3:0]  e = raw[6:3];
     logic [2:0]  m = raw[2:0];
@@ -212,6 +232,22 @@ function automatic real bits_to_real(input fp_format_e fmt, input logic [31:0] b
       else        return sign * (m / 8.0) * pow2(-6.0);
     end else begin
       return sign * (1.0 + m / 8.0) * pow2( (int'(e) - 7));
+    end
+  end
+  else if (fmt == FP8ALT) begin
+    // FP8ALT E5M2, bias = 15
+    logic        s = raw[7];
+    logic [4:0]  e = raw[6:2];
+    logic [1:0]  m = raw[1:0];
+    real sign = s ? -1.0 : 1.0;
+    if (e == 5'b11111) begin
+      if (m == 0) return sign * (1.0/0.0); // inf
+      else        return 0.0/0.0;          // NaN
+    end else if (e == 5'b00000) begin
+      if (m == 0) return sign * 0.0;       // zero
+      else        return sign * (m / 4.0) * pow2(-14.0);  // subnormal
+    end else begin
+      return sign * (1.0 + m / 4.0) * pow2((int'(e) - 15));
     end
   end
 
@@ -250,6 +286,21 @@ int pass_dp_fp16, total_dp_fp16;
 int pass_dp_fp8, total_dp_fp8;
 int pass_dp_fp4, total_dp_fp4;
 int pass_status_directed, total_status_directed;
+int pass_int16, total_int16;
+int pass_int8,  total_int8;
+int pass_int4,  total_int4;
+int pass_bf16,      total_bf16;
+int pass_simd_bf16, total_simd_bf16;
+int pass_dp_bf16,   total_dp_bf16;
+int pass_fp8alt,      total_fp8alt;
+int pass_simd_fp8alt, total_simd_fp8alt;
+int pass_dp_fp8alt,   total_dp_fp8alt;
+// BF16 as DP accumulator destination (dst_fmt=FP16ALT). Same DP geometry as
+// the FP32-accumulator paths, but result and addend `c` are BF16.
+int pass_dp_bf16_bf16,   total_dp_bf16_bf16;
+int pass_dp_fp8_bf16,    total_dp_fp8_bf16;
+int pass_dp_fp4_bf16,    total_dp_fp4_bf16;
+int pass_dp_fp8alt_bf16, total_dp_fp8alt_bf16;
 
 initial begin
   verbose = $test$plusargs("VERBOSE");
@@ -299,11 +350,21 @@ task automatic print_summary();
   total_tests = total_fp32 + total_fp16 + total_fp8 +
                 total_simd_fp16 + total_simd_fp8 +
                 total_dp_fp16 + total_dp_fp8 + total_dp_fp4 +
-                total_status_directed;
+                total_status_directed +
+                total_int16 + total_int8 + total_int4 +
+                total_bf16 + total_simd_bf16 + total_dp_bf16 +
+                total_fp8alt + total_simd_fp8alt + total_dp_fp8alt +
+                total_dp_bf16_bf16 + total_dp_fp8_bf16 +
+                total_dp_fp4_bf16  + total_dp_fp8alt_bf16;
   total_pass  = pass_fp32 + pass_fp16 + pass_fp8 +
                 pass_simd_fp16 + pass_simd_fp8 +
                 pass_dp_fp16 + pass_dp_fp8 + pass_dp_fp4 +
-                pass_status_directed;
+                pass_status_directed +
+                pass_int16 + pass_int8 + pass_int4 +
+                pass_bf16 + pass_simd_bf16 + pass_dp_bf16 +
+                pass_fp8alt + pass_simd_fp8alt + pass_dp_fp8alt +
+                pass_dp_bf16_bf16 + pass_dp_fp8_bf16 +
+                pass_dp_fp4_bf16  + pass_dp_fp8alt_bf16;
   total_fail  = total_tests - total_pass;
 
   $display("\n[SUMMARY]");
@@ -316,6 +377,19 @@ task automatic print_summary();
   if (total_dp_fp8  > 0) $display("  fp8_fp32_dp    : %0d / %0d passed", pass_dp_fp8,  total_dp_fp8);
   if (total_dp_fp4  > 0) $display("  fp4_fp32_dp    : %0d / %0d passed", pass_dp_fp4,  total_dp_fp4);
   if (total_status_directed > 0) $display("  status_directed: %0d / %0d passed", pass_status_directed, total_status_directed);
+  if (total_int16 > 0) $display("  int16          : %0d / %0d passed", pass_int16, total_int16);
+  if (total_int8  > 0) $display("  int8           : %0d / %0d passed", pass_int8,  total_int8);
+  if (total_int4  > 0) $display("  int4           : %0d / %0d passed", pass_int4,  total_int4);
+  if (total_bf16        > 0) $display("  bf16           : %0d / %0d passed", pass_bf16,        total_bf16);
+  if (total_simd_bf16   > 0) $display("  bf16_simd_bf16 : %0d / %0d passed", pass_simd_bf16,   total_simd_bf16);
+  if (total_dp_bf16     > 0) $display("  bf16_fp32_dp   : %0d / %0d passed", pass_dp_bf16,     total_dp_bf16);
+  if (total_fp8alt      > 0) $display("  fp8alt         : %0d / %0d passed", pass_fp8alt,      total_fp8alt);
+  if (total_simd_fp8alt > 0) $display("  fp8alt_simd    : %0d / %0d passed", pass_simd_fp8alt, total_simd_fp8alt);
+  if (total_dp_fp8alt   > 0) $display("  fp8alt_fp32_dp : %0d / %0d passed", pass_dp_fp8alt,   total_dp_fp8alt);
+  if (total_dp_bf16_bf16   > 0) $display("  bf16_bf16_dp   : %0d / %0d passed", pass_dp_bf16_bf16,   total_dp_bf16_bf16);
+  if (total_dp_fp8_bf16    > 0) $display("  fp8_bf16_dp    : %0d / %0d passed", pass_dp_fp8_bf16,    total_dp_fp8_bf16);
+  if (total_dp_fp4_bf16    > 0) $display("  fp4_bf16_dp    : %0d / %0d passed", pass_dp_fp4_bf16,    total_dp_fp4_bf16);
+  if (total_dp_fp8alt_bf16 > 0) $display("  fp8alt_bf16_dp : %0d / %0d passed", pass_dp_fp8alt_bf16, total_dp_fp8alt_bf16);
 
   if (total_fail == 0) begin
     $display("      ");
@@ -348,14 +422,24 @@ function automatic int total_tests_count();
   total_tests_count = total_fp32 + total_fp16 + total_fp8 +
                       total_simd_fp16 + total_simd_fp8 +
                       total_dp_fp16 + total_dp_fp8 + total_dp_fp4 +
-                      total_status_directed;
+                      total_status_directed +
+                      total_int16 + total_int8 + total_int4 +
+                      total_bf16 + total_simd_bf16 + total_dp_bf16 +
+                      total_fp8alt + total_simd_fp8alt + total_dp_fp8alt +
+                      total_dp_bf16_bf16 + total_dp_fp8_bf16 +
+                      total_dp_fp4_bf16  + total_dp_fp8alt_bf16;
 endfunction
 
 function automatic int total_pass_count();
   total_pass_count = pass_fp32 + pass_fp16 + pass_fp8 +
                      pass_simd_fp16 + pass_simd_fp8 +
                      pass_dp_fp16 + pass_dp_fp8 + pass_dp_fp4 +
-                     pass_status_directed;
+                     pass_status_directed +
+                     pass_int16 + pass_int8 + pass_int4 +
+                     pass_bf16 + pass_simd_bf16 + pass_dp_bf16 +
+                     pass_fp8alt + pass_simd_fp8alt + pass_dp_fp8alt +
+                     pass_dp_bf16_bf16 + pass_dp_fp8_bf16 +
+                     pass_dp_fp4_bf16  + pass_dp_fp8alt_bf16;
 endfunction
 
 function automatic int total_fail_count();
@@ -962,6 +1046,810 @@ status_t masked_diff;
   simd_mask_i = '1;
 endtask
 
+// ----------------------------------------
+// INT_DP_FMADD coverage (TransDot-level, FPU only).
+// Generates 1024 random signed inputs per format and compares the FPU's
+// INT32 result against a bit-exact SV golden. Lane geometry matches the
+// implemented k (INT16 k=1, INT8 k=2, INT4 k=4 — see
+// docs/systolic/int_dp_fmadd_status.md): each INT-X format reuses the
+// FP-2X datapath, so only the lower 16 bits of operand_a/operand_b are
+// fed into the multiplier in INT mode. operand_c is the full INT32
+// accumulator.
+// ----------------------------------------
+task automatic run_int(int_format_e ifmt, string prefix);
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  longint signed golden_full;
+  logic   signed [31:0] golden;
+  logic   signed [31:0] hw_result;
+  logic   signed [31:0] c_acc;
+  logic   signed [15:0] a16, b16;
+  logic   signed [ 7:0] a8_0, a8_1, b8_0, b8_1;
+  logic   signed [ 3:0] a4_0, a4_1, a4_2, a4_3;
+  logic   signed [ 3:0] b4_0, b4_1, b4_2, b4_3;
+
+  src_fmt_i      = FP32;     // unused in INT mode but must hold a valid value
+  dst_fmt_i      = FP32;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 1'b0;
+  int_fmt_i      = ifmt;
+  op_mod_i       = 1'b0;     // 0 → signed (per fpnew_pkg INT_DP_FMADD comment)
+
+  for (int i = 0; i < ntests; i++) begin
+    operands_i[0] = $urandom();
+    operands_i[1] = $urandom();
+    operands_i[2] = $urandom();
+    op_i          = fpnew_pkg::INT_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    c_acc       = operands_i[2][31:0];
+    golden_full = c_acc;
+    case (ifmt)
+      INT16: begin
+        a16 = operands_i[0][15:0];
+        b16 = operands_i[1][15:0];
+        golden_full += longint'(a16) * longint'(b16);
+      end
+      INT8: begin
+        a8_0 = operands_i[0][ 7:0];   a8_1 = operands_i[0][15:8];
+        b8_0 = operands_i[1][ 7:0];   b8_1 = operands_i[1][15:8];
+        golden_full += longint'(a8_0) * longint'(b8_0)
+                     + longint'(a8_1) * longint'(b8_1);
+      end
+      INT4: begin
+        a4_0 = operands_i[0][ 3: 0];  b4_0 = operands_i[1][ 3: 0];
+        a4_1 = operands_i[0][ 7: 4];  b4_1 = operands_i[1][ 7: 4];
+        a4_2 = operands_i[0][11: 8];  b4_2 = operands_i[1][11: 8];
+        a4_3 = operands_i[0][15:12];  b4_3 = operands_i[1][15:12];
+        golden_full += longint'(a4_0) * longint'(b4_0)
+                     + longint'(a4_1) * longint'(b4_1)
+                     + longint'(a4_2) * longint'(b4_2)
+                     + longint'(a4_3) * longint'(b4_3);
+      end
+      default: $fatal(1, "[TB] run_int: unsupported INT format %0d", ifmt);
+    endcase
+
+    golden    = golden_full[31:0];
+    hw_result = result_o;
+
+    if (hw_result === golden) begin
+      pass_count++;
+      if (verbose)
+        $display("[PASS] %s i=%0d a=%h b=%h c=%h -> hw=%0d gold=%0d",
+                 prefix, i, operands_i[0], operands_i[1], operands_i[2],
+                 $signed(hw_result), $signed(golden));
+    end else begin
+      $error("[FAIL] %s i=%0d a=%h b=%h c=%h -> hw=%0d (%h) gold=%0d (%h)",
+             prefix, i, operands_i[0], operands_i[1], operands_i[2],
+             $signed(hw_result), hw_result, $signed(golden), golden);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  case (ifmt)
+    INT16: begin pass_int16 = pass_count; total_int16 = ntests; end
+    INT8:  begin pass_int8  = pass_count; total_int8  = ntests; end
+    INT4:  begin pass_int4  = pass_count; total_int4  = ntests; end
+    default: ;
+  endcase
+endtask
+
+// ----------------------------------------
+// BF16 (FP16ALT, e8m7) coverage.
+// Generates 1024 random BF16 inputs per format and compares the FPU
+// output against an SV `real` golden with REL_ERR_THRESH tolerance
+// (BF16's 7-b mantissa makes 1 ULP ≈ 0.78%, comfortably under 1%).
+// NaN / Inf inputs are filtered at generation; subnormals and zeros
+// are kept.
+// ----------------------------------------
+// Generate BF16 and FP32 with *bounded* exponent so a 2-lane BF16 dot product
+// plus FP32 accumulator stays well within FP32's normal range. Without this
+// bound, BF16's [2^-126, 2^127] dynamic range can produce 2-lane products up
+// to 2^254 — far past FP32 max (2^127), so the HW saturates correctly while
+// the SV `real` golden does not, generating spurious mismatches. The window
+// below caps |x| ≤ 2^32 and |x| ≥ 2^-32, so |a·b| ≤ 2^65 and |Σ a·b + c| stays
+// inside FP32.
+function automatic logic [15:0] gen_finite_bf16();
+  logic [15:0] r;
+  logic [7:0]  e;
+  r        = $urandom() & 16'hFFFF;
+  e        = ($urandom() % 65) + 95;   // biased exp ∈ [95, 159] → unbiased [-32, +32]
+  r[14:7]  = e;
+  return r;
+endfunction
+
+function automatic logic [31:0] gen_finite_fp32();
+  logic [31:0] r;
+  logic [7:0]  e;
+  r         = $urandom();
+  e         = ($urandom() % 65) + 95;  // same window as BF16 to stay in-range
+  r[30:23]  = e;
+  return r;
+endfunction
+
+task automatic run_bf16_scalar(string prefix);
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [15:0] a_bf, b_bf, c_bf;
+  real a_r, b_r, c_r, hw, gold, diff;
+  logic [31:0] gold_fp32_bits;
+  int  ulp;
+
+  src_fmt_i      = FP16ALT;
+  dst_fmt_i      = FP16ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    a_bf = gen_finite_bf16();
+    b_bf = gen_finite_bf16();
+    c_bf = gen_finite_bf16();
+
+    // NaN-box BF16 into the 32-b operand word (BF16 occupies the lower 16 b).
+    operands_i[0] = box_bits({16'd0, a_bf}, FP16ALT);
+    operands_i[1] = box_bits({16'd0, b_bf}, FP16ALT);
+    operands_i[2] = box_bits({16'd0, c_bf}, FP16ALT);
+    op_i          = fpnew_pkg::FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    a_r  = bits_to_real(FP16ALT, {16'hFFFF, a_bf});
+    b_r  = bits_to_real(FP16ALT, {16'hFFFF, b_bf});
+    c_r  = bits_to_real(FP16ALT, {16'hFFFF, c_bf});
+    gold = a_r * b_r + c_r;
+    hw   = bits_to_real(FP16ALT, result_o);
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+    // BF16 ≈ upper 16 b of an FP32 round of `gold`. Good enough for ULP fallback.
+    gold_fp32_bits = $shortrealtobits(shortreal'(gold));
+    ulp  = ulp_diff({16'd0, result_o[15:0]}, {16'd0, gold_fp32_bits[31:16]});
+
+    if ((diff < REL_ERR_THRESH) || ($abs(ulp) < ULP_ERR_THRESH)) begin
+      pass_count++;
+      if (verbose)
+        $display("[PASS] %s i=%0d a=%e b=%e c=%e -> hw=%e gold=%e diff=%e ulp=%0d",
+                 prefix, i, a_r, b_r, c_r, hw, gold, diff, ulp);
+    end else begin
+      $error("[FAIL] %s i=%0d a=%e (%h) b=%e (%h) c=%e (%h) -> hw=%e (%h) gold=%e diff=%e ulp=%0d",
+             prefix, i, a_r, a_bf, b_r, b_bf, c_r, c_bf, hw, result_o[15:0], gold, diff, ulp);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_bf16  = pass_count;
+  total_bf16 = ntests;
+endtask
+
+task automatic run_bf16_simd(string prefix);
+  // Two parallel scalar BF16 FMAs: result = {a1·b1+c1, a0·b0+c0}, each lane
+  // independent (no DP reduction). Lane 0 in operands_i[*][15:0],
+  // lane 1 in operands_i[*][31:16]. Each lane is bf16-rounded to bf16.
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [15:0] a0_bf, a1_bf, b0_bf, b1_bf, c0_bf, c1_bf;
+  real a0_r, a1_r, b0_r, b1_r, c0_r, c1_r;
+  real hw0, hw1, gold0, gold1, diff0, diff1;
+  logic [31:0] gold0_fp32_bits, gold1_fp32_bits;
+  int  ulp0, ulp1;
+  bit  pass_low;
+
+  src_fmt_i      = FP16ALT;
+  dst_fmt_i      = FP16ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    a0_bf = gen_finite_bf16();   a1_bf = gen_finite_bf16();
+    b0_bf = gen_finite_bf16();   b1_bf = gen_finite_bf16();
+    c0_bf = gen_finite_bf16();   c1_bf = gen_finite_bf16();
+
+    operands_i[0] = {a1_bf, a0_bf};
+    operands_i[1] = {b1_bf, b0_bf};
+    operands_i[2] = {c1_bf, c0_bf};
+    op_i          = fpnew_pkg::TDOT_SIMD_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    a0_r = bits_to_real(FP16ALT, {16'hFFFF, a0_bf});
+    b0_r = bits_to_real(FP16ALT, {16'hFFFF, b0_bf});
+    c0_r = bits_to_real(FP16ALT, {16'hFFFF, c0_bf});
+    a1_r = bits_to_real(FP16ALT, {16'hFFFF, a1_bf});
+    b1_r = bits_to_real(FP16ALT, {16'hFFFF, b1_bf});
+    c1_r = bits_to_real(FP16ALT, {16'hFFFF, c1_bf});
+
+    gold0 = a0_r * b0_r + c0_r;
+    gold1 = a1_r * b1_r + c1_r;
+    hw0   = bits_to_real(FP16ALT, {16'hFFFF, result_o[15:0]});
+    hw1   = bits_to_real(FP16ALT, {16'hFFFF, result_o[31:16]});
+    diff0 = (gold0 == 0) ? $abs(hw0) : $abs((hw0 - gold0) / gold0);
+    diff1 = (gold1 == 0) ? $abs(hw1) : $abs((hw1 - gold1) / gold1);
+
+    gold0_fp32_bits = $shortrealtobits(shortreal'(gold0));
+    gold1_fp32_bits = $shortrealtobits(shortreal'(gold1));
+    ulp0 = ulp_diff({16'd0, result_o[15:0]},  {16'd0, gold0_fp32_bits[31:16]});
+    ulp1 = ulp_diff({16'd0, result_o[31:16]}, {16'd0, gold1_fp32_bits[31:16]});
+
+    pass_low = (diff0 < REL_ERR_THRESH) || ($abs(ulp0) < ULP_ERR_THRESH);
+    if (pass_low && ((diff1 < REL_ERR_THRESH) || ($abs(ulp1) < ULP_ERR_THRESH))) begin
+      pass_count++;
+      if (verbose)
+        $display("[PASS] %s i=%0d  L0: hw=%e gold=%e (diff=%e ulp=%0d)  L1: hw=%e gold=%e (diff=%e ulp=%0d)",
+                 prefix, i, hw0, gold0, diff0, ulp0, hw1, gold1, diff1, ulp1);
+    end else begin
+      $error("[FAIL] %s i=%0d  L0: a=%e b=%e c=%e -> hw=%e gold=%e diff=%e ulp=%0d  L1: a=%e b=%e c=%e -> hw=%e gold=%e diff=%e ulp=%0d",
+             prefix, i, a0_r, b0_r, c0_r, hw0, gold0, diff0, ulp0,
+                       a1_r, b1_r, c1_r, hw1, gold1, diff1, ulp1);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_simd_bf16  = pass_count;
+  total_simd_bf16 = ntests;
+endtask
+
+task automatic run_bf16_dp(string prefix);
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [15:0] a0_bf, a1_bf, b0_bf, b1_bf;
+  logic [31:0] c_fp;
+  real a0_r, a1_r, b0_r, b1_r, c_r, hw, gold, diff;
+  int  ulp;
+
+  src_fmt_i      = FP16ALT;
+  dst_fmt_i      = FP32;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    a0_bf = gen_finite_bf16();
+    a1_bf = gen_finite_bf16();
+    b0_bf = gen_finite_bf16();
+    b1_bf = gen_finite_bf16();
+    c_fp  = gen_finite_fp32();
+
+    operands_i[0] = {a1_bf, a0_bf};   // lane 1 in upper half, lane 0 in lower half
+    operands_i[1] = {b1_bf, b0_bf};
+    operands_i[2] = c_fp;
+    op_i          = fpnew_pkg::TDOT_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    a0_r = bits_to_real(FP16ALT, {16'hFFFF, a0_bf});
+    a1_r = bits_to_real(FP16ALT, {16'hFFFF, a1_bf});
+    b0_r = bits_to_real(FP16ALT, {16'hFFFF, b0_bf});
+    b1_r = bits_to_real(FP16ALT, {16'hFFFF, b1_bf});
+    c_r  = bits_to_real(FP32, c_fp);
+    gold = a0_r * b0_r + a1_r * b1_r + c_r;
+    hw   = bits_to_real(FP32, result_o);
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+    ulp  = ulp_diff(result_o, $shortrealtobits(shortreal'(gold)));
+
+    if ((diff < REL_ERR_THRESH) || ($abs(ulp) < ULP_ERR_THRESH)) begin
+      pass_count++;
+      if (verbose)
+        $display("[PASS] %s i=%0d a0=%e a1=%e b0=%e b1=%e c=%e -> hw=%e gold=%e diff=%e ulp=%0d",
+                 prefix, i, a0_r, a1_r, b0_r, b1_r, c_r, hw, gold, diff, ulp);
+    end else begin
+      $error("[FAIL] %s i=%0d a0=%e a1=%e b0=%e b1=%e c=%e -> hw=%e (%h) gold=%e diff=%e ulp=%0d",
+             prefix, i, a0_r, a1_r, b0_r, b1_r, c_r, hw, result_o, gold, diff, ulp);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_dp_bf16  = pass_count;
+  total_dp_bf16 = ntests;
+endtask
+
+// ----------------------------------------
+// FP8ALT (E5M2) coverage. Same recipe as BF16: $urandom + SV-real golden,
+// REL_ERR_THRESH tolerance. E5M2 has 2-b explicit mantissa so 1 ULP ≈ 25%
+// for very small magnitudes — we keep REL_ERR_THRESH at 1% but rely on the
+// ULP fallback (ULP_ERR_THRESH=2) which is the canonical pass criterion at
+// this precision. NaN / Inf inputs are filtered at generation.
+// ----------------------------------------
+function automatic logic [7:0] gen_finite_fp8alt();
+  // Tight exponent bound [13, 17] (unbiased [-2, +2]): keeps dp_shamt within
+  // an architecturally-safe range across all 4 SIMD lanes (otherwise the
+  // shared dp_shamt fabric — designed for SUPER_EXP_BITS_FP8=4 / FP8 — can
+  // shift FP8ALT lane partials further than its level-1 buffers tolerate).
+  logic [7:0] r;
+  logic [4:0] e;
+  r       = $urandom() & 8'hFF;
+  e       = ($urandom() % 5) + 13;      // biased exp ∈ [13, 17]
+  r[6:2]  = e;
+  return r;
+endfunction
+
+task automatic run_fp8alt_scalar(string prefix);
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [7:0]  a_bf, b_bf, c_bf;
+  real a_r, b_r, c_r, hw, gold, diff;
+  logic [31:0] gold_fp32_bits;
+  int  ulp;
+
+  src_fmt_i      = FP8ALT;
+  dst_fmt_i      = FP8ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    a_bf = gen_finite_fp8alt();
+    b_bf = gen_finite_fp8alt();
+    c_bf = gen_finite_fp8alt();
+
+    operands_i[0] = box_bits({24'd0, a_bf}, FP8);  // FP8/FP8ALT use the same NaN-box pattern (both 8-b)
+    operands_i[1] = box_bits({24'd0, b_bf}, FP8);
+    operands_i[2] = box_bits({24'd0, c_bf}, FP8);
+    op_i          = fpnew_pkg::FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    a_r  = bits_to_real(FP8ALT, {24'd0, a_bf});
+    b_r  = bits_to_real(FP8ALT, {24'd0, b_bf});
+    c_r  = bits_to_real(FP8ALT, {24'd0, c_bf});
+    gold = a_r * b_r + c_r;
+    hw   = bits_to_real(FP8ALT, {24'd0, result_o[7:0]});
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+    gold_fp32_bits = $shortrealtobits(shortreal'(gold));
+    // Compare 8-b dst directly against truncated FP32 gold; pad to 32 b for
+    // the helper. (One of the upper "FP8" bytes is fine — the helper only
+    // looks at ints.)
+    ulp = ulp_diff({24'd0, result_o[7:0]}, {24'd0, gold_fp32_bits[31:24]});
+
+    // E5M2 has 2-b explicit mantissa; max RNE relative error per FMA is
+    // 0.5 ULP = 0.5/4 = 12.5%. Use 0.20 to absorb that with margin.
+    if ((diff < 0.20) || ($abs(ulp) < ULP_ERR_THRESH)) begin
+      pass_count++;
+      if (verbose)
+        $display("[PASS] %s i=%0d a=%e b=%e c=%e -> hw=%e gold=%e diff=%e ulp=%0d",
+                 prefix, i, a_r, b_r, c_r, hw, gold, diff, ulp);
+    end else begin
+      $error("[FAIL] %s i=%0d a=%e (%h) b=%e (%h) c=%e (%h) -> hw=%e (%h) gold=%e diff=%e ulp=%0d",
+             prefix, i, a_r, a_bf, b_r, b_bf, c_r, c_bf, hw, result_o[7:0], gold, diff, ulp);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_fp8alt  = pass_count;
+  total_fp8alt = ntests;
+endtask
+
+task automatic run_fp8alt_simd(string prefix);
+  // 4 parallel scalar FP8ALT FMAs (mirror of fp8_simd_fp8). Each lane is one
+  // FMA, packed into the 32-b operand at byte boundaries.
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [7:0]  a [0:3];
+  logic [7:0]  b [0:3];
+  logic [7:0]  c [0:3];
+  real a_r [0:3];
+  real b_r [0:3];
+  real c_r [0:3];
+  real hw_r [0:3];
+  real gold [0:3];
+  real diff [0:3];
+  logic [31:0] gold_fp32 [0:3];
+  int  ulp [0:3];
+  bit  all_lanes_pass;
+
+  src_fmt_i      = FP8ALT;
+  dst_fmt_i      = FP8ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    for (int L = 0; L < 4; L++) begin
+      a[L] = gen_finite_fp8alt();
+      b[L] = gen_finite_fp8alt();
+      c[L] = gen_finite_fp8alt();
+    end
+
+    operands_i[0] = {a[3], a[2], a[1], a[0]};
+    operands_i[1] = {b[3], b[2], b[1], b[0]};
+    operands_i[2] = {c[3], c[2], c[1], c[0]};
+    op_i          = fpnew_pkg::TDOT_SIMD_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    all_lanes_pass = 1'b1;
+    for (int L = 0; L < 4; L++) begin
+      a_r[L]  = bits_to_real(FP8ALT, {24'd0, a[L]});
+      b_r[L]  = bits_to_real(FP8ALT, {24'd0, b[L]});
+      c_r[L]  = bits_to_real(FP8ALT, {24'd0, c[L]});
+      gold[L] = a_r[L] * b_r[L] + c_r[L];
+      hw_r[L] = bits_to_real(FP8ALT, {24'd0, result_o[L*8 +: 8]});
+      diff[L] = (gold[L] == 0) ? $abs(hw_r[L]) : $abs((hw_r[L] - gold[L]) / gold[L]);
+      gold_fp32[L] = $shortrealtobits(shortreal'(gold[L]));
+      ulp[L]  = ulp_diff({24'd0, result_o[L*8 +: 8]}, {24'd0, gold_fp32[L][31:24]});
+      // E5M2 1 ULP ≈ 25%; 0.20 rel-err absorbs 0.5-ULP RNE rounding.
+      if (!((diff[L] < 0.20) || ($abs(ulp[L]) < ULP_ERR_THRESH)))
+        all_lanes_pass = 1'b0;
+    end
+
+    if (all_lanes_pass) begin
+      pass_count++;
+    end else begin
+      $error("[FAIL] %s i=%0d  L0 a=%h b=%h c=%h hw=%h(%e) gold=%e diff=%e ulp=%0d  L1 hw=%h gold=%e  L2 hw=%h gold=%e  L3 hw=%h gold=%e",
+             prefix, i,
+             a[0], b[0], c[0], result_o[7:0], hw_r[0], gold[0], diff[0], ulp[0],
+             result_o[15:8],  gold[1],
+             result_o[23:16], gold[2],
+             result_o[31:24], gold[3]);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_simd_fp8alt  = pass_count;
+  total_simd_fp8alt = ntests;
+endtask
+
+task automatic run_fp8alt_dp(string prefix);
+  // 4-lane FP8ALT DPA into FP32 accumulator (mirror of fp8_fp32_dp).
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [7:0]  a [0:3];
+  logic [7:0]  b [0:3];
+  logic [31:0] c_fp;
+  real a_r [0:3];
+  real b_r [0:3];
+  real c_r;
+  real hw, gold, diff;
+  int  ulp;
+
+  src_fmt_i      = FP8ALT;
+  dst_fmt_i      = FP32;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    for (int L = 0; L < 4; L++) begin
+      a[L] = gen_finite_fp8alt();
+      b[L] = gen_finite_fp8alt();
+    end
+    c_fp = gen_finite_fp32();
+
+    operands_i[0] = {a[3], a[2], a[1], a[0]};
+    operands_i[1] = {b[3], b[2], b[1], b[0]};
+    operands_i[2] = c_fp;
+    op_i          = fpnew_pkg::TDOT_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    c_r  = bits_to_real(FP32, c_fp);
+    gold = c_r;
+    for (int L = 0; L < 4; L++) begin
+      a_r[L] = bits_to_real(FP8ALT, {24'd0, a[L]});
+      b_r[L] = bits_to_real(FP8ALT, {24'd0, b[L]});
+      gold   = gold + a_r[L] * b_r[L];
+    end
+    hw   = bits_to_real(FP32, result_o);
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+    ulp  = ulp_diff(result_o, $shortrealtobits(shortreal'(gold)));
+
+    if ((diff < REL_ERR_THRESH) || ($abs(ulp) < ULP_ERR_THRESH)) begin
+      pass_count++;
+      if (verbose)
+        $display("[PASS] %s i=%0d  ab={%e,%e,%e,%e}*{%e,%e,%e,%e} c=%e -> hw=%e gold=%e diff=%e ulp=%0d",
+                 prefix, i, a_r[0], a_r[1], a_r[2], a_r[3],
+                          b_r[0], b_r[1], b_r[2], b_r[3], c_r, hw, gold, diff, ulp);
+    end else begin
+      $error("[FAIL] %s i=%0d  ab={%e,%e,%e,%e}*{%e,%e,%e,%e} c=%e -> hw=%e (%h) gold=%e diff=%e ulp=%0d",
+             prefix, i, a_r[0], a_r[1], a_r[2], a_r[3],
+                       b_r[0], b_r[1], b_r[2], b_r[3], c_r, hw, result_o, gold, diff, ulp);
+    end
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_dp_fp8alt  = pass_count;
+  total_dp_fp8alt = ntests;
+endtask
+
+// ----------------------------------------
+// BF16 (FP16ALT) as the DP-mode accumulator destination.
+// All four tasks set dst_fmt_i = FP16ALT, pack the BF16 c-operand into the
+// lower 16 bits of operands_i[2], and decode result_o[15:0] as BF16.
+// REL_ERR_THRESH 1% with ULP_ERR_THRESH=2 fallback (BF16 1 ULP ≈ 0.78%).
+// ----------------------------------------
+function automatic logic [7:0] gen_finite_fp8();
+  // E4M3, biased exp ∈ [3, 11] → unbiased [-4, +4]. Avoids 0 (subnormal hop)
+  // and 15 (NaN/Inf). Magnitudes stay in [~0.06, ~30].
+  logic [7:0] r;
+  logic [3:0] e;
+  r       = $urandom() & 8'hFF;
+  e       = ($urandom() % 9) + 3;
+  r[6:3]  = e;
+  return r;
+endfunction
+
+function automatic logic [3:0] gen_finite_fp4_nibble();
+  // FP4 e2m1, exp ∈ {00, 01, 10}. e=11 = NaN/Inf — exclude.
+  logic [3:0] r;
+  logic [1:0] e;
+  r       = $urandom() & 4'hF;
+  e       = $urandom() % 3;
+  r[2:1]  = e;
+  return r;
+endfunction
+
+task automatic run_bf16_bf16_dp(string prefix);
+  // 2-lane BF16 dot product accumulating into BF16: hw = a0*b0 + a1*b1 + c.
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [15:0] a0_bf, a1_bf, b0_bf, b1_bf, c_bf;
+  real a0_r, a1_r, b0_r, b1_r, c_r, hw, gold, diff;
+
+  src_fmt_i      = FP16ALT;
+  dst_fmt_i      = FP16ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    a0_bf = gen_finite_bf16();
+    a1_bf = gen_finite_bf16();
+    b0_bf = gen_finite_bf16();
+    b1_bf = gen_finite_bf16();
+    c_bf  = gen_finite_bf16();
+
+    operands_i[0] = {a1_bf, a0_bf};
+    operands_i[1] = {b1_bf, b0_bf};
+    operands_i[2] = {16'h0000, c_bf};
+    op_i          = fpnew_pkg::TDOT_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    a0_r = bits_to_real(FP16ALT, {16'h0, a0_bf});
+    a1_r = bits_to_real(FP16ALT, {16'h0, a1_bf});
+    b0_r = bits_to_real(FP16ALT, {16'h0, b0_bf});
+    b1_r = bits_to_real(FP16ALT, {16'h0, b1_bf});
+    c_r  = bits_to_real(FP16ALT, {16'h0, c_bf});
+    gold = a0_r * b0_r + a1_r * b1_r + c_r;
+    hw   = bits_to_real(FP16ALT, {16'h0, result_o[15:0]});
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+
+    if (diff < REL_ERR_THRESH) pass_count++;
+    else
+      $error("[FAIL] %s i=%0d a0=%e a1=%e b0=%e b1=%e c=%e -> hw=%e (%h) gold=%e diff=%e",
+             prefix, i, a0_r, a1_r, b0_r, b1_r, c_r, hw, result_o[15:0], gold, diff);
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_dp_bf16_bf16  = pass_count;
+  total_dp_bf16_bf16 = ntests;
+endtask
+
+task automatic run_fp8_bf16_dp(string prefix);
+  // 4-lane FP8 dot product accumulating into BF16.
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [7:0]  a [0:3];
+  logic [7:0]  b [0:3];
+  logic [15:0] c_bf;
+  real a_r [0:3];
+  real b_r [0:3];
+  real c_r, hw, gold, diff;
+
+  src_fmt_i      = FP8;
+  dst_fmt_i      = FP16ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    for (int L = 0; L < 4; L++) begin
+      a[L] = gen_finite_fp8();
+      b[L] = gen_finite_fp8();
+    end
+    c_bf = gen_finite_bf16();
+
+    operands_i[0] = {a[3], a[2], a[1], a[0]};
+    operands_i[1] = {b[3], b[2], b[1], b[0]};
+    operands_i[2] = {16'h0000, c_bf};
+    op_i          = fpnew_pkg::TDOT_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    c_r  = bits_to_real(FP16ALT, {16'h0, c_bf});
+    gold = c_r;
+    for (int L = 0; L < 4; L++) begin
+      a_r[L] = bits_to_real(FP8, {24'd0, a[L]});
+      b_r[L] = bits_to_real(FP8, {24'd0, b[L]});
+      gold   = gold + a_r[L] * b_r[L];
+    end
+    hw   = bits_to_real(FP16ALT, {16'h0, result_o[15:0]});
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+
+    if (diff < REL_ERR_THRESH) pass_count++;
+    else
+      $error("[FAIL] %s i=%0d ab={%e,%e,%e,%e}*{%e,%e,%e,%e} c=%e -> hw=%e (%h) gold=%e diff=%e",
+             prefix, i, a_r[0], a_r[1], a_r[2], a_r[3],
+                       b_r[0], b_r[1], b_r[2], b_r[3], c_r, hw, result_o[15:0], gold, diff);
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_dp_fp8_bf16  = pass_count;
+  total_dp_fp8_bf16 = ntests;
+endtask
+
+task automatic run_fp4_bf16_dp(string prefix);
+  // 8-lane FP4 dot product accumulating into BF16.
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [3:0]  a [0:7];
+  logic [3:0]  b [0:7];
+  logic [15:0] c_bf;
+  real a_r [0:7];
+  real b_r [0:7];
+  real c_r, hw, gold, diff;
+
+  src_fmt_i      = FP4;
+  dst_fmt_i      = FP16ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    for (int L = 0; L < 8; L++) begin
+      a[L] = gen_finite_fp4_nibble();
+      b[L] = gen_finite_fp4_nibble();
+    end
+    c_bf = gen_finite_bf16();
+
+    operands_i[0] = {a[7], a[6], a[5], a[4], a[3], a[2], a[1], a[0]};
+    operands_i[1] = {b[7], b[6], b[5], b[4], b[3], b[2], b[1], b[0]};
+    operands_i[2] = {16'h0000, c_bf};
+    op_i          = fpnew_pkg::TDOT_FP4_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    c_r  = bits_to_real(FP16ALT, {16'h0, c_bf});
+    gold = c_r;
+    for (int L = 0; L < 8; L++) begin
+      a_r[L] = fp4_nibble_to_real(a[L]);
+      b_r[L] = fp4_nibble_to_real(b[L]);
+      gold   = gold + a_r[L] * b_r[L];
+    end
+    hw   = bits_to_real(FP16ALT, {16'h0, result_o[15:0]});
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+
+    if (diff < REL_ERR_THRESH) pass_count++;
+    else
+      $error("[FAIL] %s i=%0d  c=%e -> hw=%e (%h) gold=%e diff=%e",
+             prefix, i, c_r, hw, result_o[15:0], gold, diff);
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_dp_fp4_bf16  = pass_count;
+  total_dp_fp4_bf16 = ntests;
+endtask
+
+task automatic run_fp8alt_bf16_dp(string prefix);
+  // 4-lane FP8ALT dot product accumulating into BF16.
+  int ntests = NUM_TESTS;
+  int pass_count = 0;
+  logic [7:0]  a [0:3];
+  logic [7:0]  b [0:3];
+  logic [15:0] c_bf;
+  real a_r [0:3];
+  real b_r [0:3];
+  real c_r, hw, gold, diff;
+
+  src_fmt_i      = FP8ALT;
+  dst_fmt_i      = FP16ALT;
+  rnd_mode_i     = RNE;
+  vectorial_op_i = 0;
+  int_fmt_i      = INT32;
+  op_mod_i       = 0;
+
+  for (int i = 0; i < ntests; i++) begin
+    for (int L = 0; L < 4; L++) begin
+      a[L] = gen_finite_fp8alt();
+      b[L] = gen_finite_fp8alt();
+    end
+    c_bf = gen_finite_bf16();
+
+    operands_i[0] = {a[3], a[2], a[1], a[0]};
+    operands_i[1] = {b[3], b[2], b[1], b[0]};
+    operands_i[2] = {16'h0000, c_bf};
+    op_i          = fpnew_pkg::TDOT_DP_FMADD;
+
+    in_valid_i = 1;
+    @(posedge clk);
+    while (!in_ready_o) @(posedge clk);
+    in_valid_i = 0;
+    wait(out_valid_o);
+    @(posedge clk);
+
+    c_r  = bits_to_real(FP16ALT, {16'h0, c_bf});
+    gold = c_r;
+    for (int L = 0; L < 4; L++) begin
+      a_r[L] = bits_to_real(FP8ALT, {24'd0, a[L]});
+      b_r[L] = bits_to_real(FP8ALT, {24'd0, b[L]});
+      gold   = gold + a_r[L] * b_r[L];
+    end
+    hw   = bits_to_real(FP16ALT, {16'h0, result_o[15:0]});
+    diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
+
+    // FP8ALT 1 ULP ≈ 25%; allow either BF16-rel-err or coarse 0.20 absorbing
+    // the input quantization noise that compounds across 4 lanes.
+    if ((diff < REL_ERR_THRESH) || (diff < 0.20)) pass_count++;
+    else
+      $error("[FAIL] %s i=%0d ab={%e,%e,%e,%e}*{%e,%e,%e,%e} c=%e -> hw=%e (%h) gold=%e diff=%e",
+             prefix, i, a_r[0], a_r[1], a_r[2], a_r[3],
+                       b_r[0], b_r[1], b_r[2], b_r[3], c_r, hw, result_o[15:0], gold, diff);
+  end
+
+  $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+  pass_dp_fp8alt_bf16  = pass_count;
+  total_dp_fp8alt_bf16 = ntests;
+endtask
+
 task automatic run_status_directed();
 status_t expected_status;
 status_t check_mask;
@@ -1038,6 +1926,19 @@ pass_dp_fp16 = 0; total_dp_fp16 = 0;
 pass_dp_fp8 = 0; total_dp_fp8 = 0;
 pass_dp_fp4 = 0; total_dp_fp4 = 0;
 pass_status_directed = 0; total_status_directed = 0;
+pass_int16 = 0; total_int16 = 0;
+pass_int8  = 0; total_int8  = 0;
+pass_int4  = 0; total_int4  = 0;
+pass_bf16      = 0; total_bf16      = 0;
+pass_simd_bf16 = 0; total_simd_bf16 = 0;
+pass_dp_bf16   = 0; total_dp_bf16   = 0;
+pass_fp8alt      = 0; total_fp8alt      = 0;
+pass_simd_fp8alt = 0; total_simd_fp8alt = 0;
+pass_dp_fp8alt   = 0; total_dp_fp8alt   = 0;
+pass_dp_bf16_bf16   = 0; total_dp_bf16_bf16   = 0;
+pass_dp_fp8_bf16    = 0; total_dp_fp8_bf16    = 0;
+pass_dp_fp4_bf16    = 0; total_dp_fp4_bf16    = 0;
+pass_dp_fp8alt_bf16 = 0; total_dp_fp8alt_bf16 = 0;
 mode_sel = "all";
 void'($value$plusargs("MODE=%s", mode_sel));
 
@@ -1046,8 +1947,13 @@ if ((mode_sel != "all") &&
     (mode_sel != "simd") &&
     (mode_sel != "dp") &&
     (mode_sel != "fp4dp") &&
-    (mode_sel != "status")) begin
-  $fatal(1, "[TB] Unsupported MODE=%s (supported: all, scalar, simd, dp, fp4dp, status)", mode_sel);
+    (mode_sel != "status") &&
+    (mode_sel != "int") &&
+    (mode_sel != "bf16") &&
+    (mode_sel != "fp8alt") &&
+    (mode_sel != "fp8alt_simd") &&
+    (mode_sel != "bf16dp")) begin
+  $fatal(1, "[TB] Unsupported MODE=%s (supported: all, scalar, simd, dp, fp4dp, status, int, bf16, fp8alt, fp8alt_simd, bf16dp)", mode_sel);
 end
 
 $display("[TB] MODE=%s", mode_sel);
@@ -1072,6 +1978,27 @@ if ((mode_sel == "all") || (mode_sel == "fp4dp")) begin
 end
 if ((mode_sel == "all") || (mode_sel == "status")) begin
   run_status_directed();
+end
+if ((mode_sel == "all") || (mode_sel == "int")) begin
+  run_int(INT16, "int16");
+  run_int(INT8,  "int8");
+  run_int(INT4,  "int4");
+end
+if ((mode_sel == "all") || (mode_sel == "bf16")) begin
+  run_bf16_scalar("bf16");
+  run_bf16_simd  ("bf16_simd_bf16");
+  run_bf16_dp    ("bf16_fp32_dp");
+end
+if ((mode_sel == "all") || (mode_sel == "fp8alt") || (mode_sel == "fp8alt_simd")) begin
+  if (mode_sel != "fp8alt_simd") run_fp8alt_scalar("fp8alt");
+  if (mode_sel == "all" || mode_sel == "fp8alt_simd") run_fp8alt_simd("fp8alt_simd");
+  if (mode_sel != "fp8alt_simd") run_fp8alt_dp    ("fp8alt_fp32_dp");
+end
+if ((mode_sel == "all") || (mode_sel == "bf16dp")) begin
+  run_bf16_bf16_dp ("bf16_bf16_dp");
+  run_fp8_bf16_dp  ("fp8_bf16_dp");
+  run_fp4_bf16_dp  ("fp4_bf16_dp");
+  run_fp8alt_bf16_dp("fp8alt_bf16_dp");
 end
 
 $display("\n");

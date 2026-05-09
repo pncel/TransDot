@@ -479,7 +479,11 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
 
   output logic [2*PRECISION_BITS-1:0]      product_non_dp_o,
   output logic [2*PRECISION_BITS-1:0]      product_dp_o,
-  output logic                             sign_out
+  output logic                             sign_out,
+  // Signed 2's-complement compressor sum, exposed for INT-mode FMA reuse.
+  // The FP path takes the magnitude form on product_dp_o; the INT path reads
+  // this signed sum directly and skips the magnitude extraction.
+  output logic [49:0]                      product_int_dp_o
 );
 
   // --------------------------------------------------------------------------
@@ -604,6 +608,7 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   logic        final_sum_neg;
   logic [47:0] product_non_dp_d, product_non_dp_q;
   logic [47:0] product_dp_d, product_dp_q;
+  logic [49:0] product_int_dp_d, product_int_dp_q;
   logic        sign_out_d, sign_out_q;
   logic [47:0]  pp3_addend_lane0, pp3_addend_lane1,pp3_addend_lane2, pp3_addend_lane3;
   logic [49:0]  pp3_addend_lane0_ext, pp3_addend_lane1_ext, pp3_addend_lane2_ext, pp3_addend_lane3_ext;
@@ -646,17 +651,22 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   assign final_sum_mag = final_sum_neg ? $unsigned(-$signed(final_sum)) : final_sum;
   assign product_non_dp_d = final_sum[47:0];
   assign product_dp_d = is_fp4 ? final_sum_mag[47:0] : final_sum_mag[48:1];
+  // INT path: signed compressor sum, full 50-bit signed (the FMA picks the
+  // bit-window that matches int_fmt and applies further alignment as needed).
+  assign product_int_dp_d = final_sum;
   assign sign_out_d = dp_enable_i ? ((final_sum_mag == 50'd0) ? 1'b0 : final_sum_neg) : 1'b0;
 
 `ifdef COMBINATIONAL
   assign product_non_dp_o = product_non_dp_d;
   assign product_dp_o = product_dp_d;
   assign sign_out = sign_out_d;
+  assign product_int_dp_o = product_int_dp_d;
 `else
   always_ff @(posedge clk_i) begin
     if (pipe_en) begin
       product_non_dp_q <= product_non_dp_d;
       product_dp_q <= product_dp_d;
+      product_int_dp_q <= product_int_dp_d;
       sign_out_q <= sign_out_d;
     end
   end
@@ -664,6 +674,7 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   assign product_non_dp_o = product_non_dp_q;
   assign product_dp_o = product_dp_q;
   assign sign_out = sign_out_q;
+  assign product_int_dp_o = product_int_dp_q;
 `endif
 
 endmodule
@@ -1222,7 +1233,9 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
 
   output logic [2*PRECISION_BITS-1:0]      product_comb_o,
   output logic [2*PRECISION_BITS-1:0]      product_dp_o,
-  output logic                             tentative_sign_dp_o
+  output logic                             tentative_sign_dp_o,
+  // Signed 2's-complement compressor sum for INT-mode FMA reuse.
+  output logic [49:0]                      product_int_dp_o
 );
   logic [2*PRECISION_BITS-1:0] packed_product_non_dp;
   logic [2*PRECISION_BITS-1:0] packed_product_dp;
@@ -1287,7 +1300,8 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
     .mantissa_b       ( mantissa_b_selected ),
     .product_non_dp_o ( packed_product_non_dp ),
     .product_dp_o     ( packed_product_dp ),
-    .sign_out         ( tentative_sign_dp_o )
+    .sign_out         ( tentative_sign_dp_o ),
+    .product_int_dp_o ( product_int_dp_o )
   );
 
   assign product_comb_o = packed_product_non_dp;

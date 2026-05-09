@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: SHL-0.51
 module transdot_fpu_top#(
-    parameter int unsigned EnableSIMDMask = 1,
-    localparam fpnew_pkg::fpu_features_t       Features       = fpnew_pkg::transdot_features,
-    localparam fpnew_pkg::fpu_implementation_t Implementation = fpnew_pkg::ADDMUL_ONLY,
-    localparam fpnew_pkg::divsqrt_unit_t       DivSqrtSel     = fpnew_pkg::THMULTI,
-    localparam int unsigned                    TrueSIMDClass  = 0,
-    localparam int unsigned                    NumLanes       = fpnew_pkg::max_num_lanes(Features.Width, Features.FpFmtMask, Features.EnableVectors),
-    localparam int unsigned                    WIDTH          = Features.Width,
-    localparam int unsigned                    NUM_OPERANDS   = 3
+    // FPU configuration
+    parameter fpnew_pkg::fpu_features_t       Features       = fpnew_pkg::transdot_features_bf16_fp8_fp4_fp8alt,
+    parameter fpnew_pkg::fpu_implementation_t Implementation = fpnew_pkg::ADDMUL_ONLY,
+    // DivSqrtSel chooses among PULP, TH32, or THMULTI (see documentation and fpnew_pkg.sv for further details)
+    parameter fpnew_pkg::divsqrt_unit_t       DivSqrtSel     = fpnew_pkg::THMULTI,
+    parameter type                            TagType        = logic,
+    parameter int unsigned                    TrueSIMDClass  = 0,
+    parameter int unsigned                    EnableSIMDMask = 0,
+    // Do not change
+    localparam int unsigned NumLanes     = fpnew_pkg::max_num_lanes(Features.Width, Features.FpFmtMask, Features.EnableVectors),
+    localparam type         MaskType     = logic [NumLanes-1:0],
+    localparam int unsigned WIDTH        = Features.Width,
+    localparam int unsigned NUM_OPERANDS = 3
 )
 (
   input logic                               clk_i,
@@ -20,9 +25,16 @@ module transdot_fpu_top#(
   input fpnew_pkg::fp_format_e              src_fmt_i,
   input fpnew_pkg::fp_format_e              dst_fmt_i,
   input fpnew_pkg::int_format_e             int_fmt_i,
+  // OCP MX (microscaling) sideband: when mx_enable_i is asserted, the FMA
+  // multiplies the standard FP4/FP8 DP result by 2^(mx_scale_a_i + mx_scale_b_i - 254),
+  // i.e. the shared E8M0 block-scale pair. mx_enable_i=0 reproduces the
+  // pre-MX behavior bit-exact. See mxfp4_mxfp8_plans.md for context.
+  input logic                               mx_enable_i,
+  input logic [7:0]                         mx_scale_a_i,
+  input logic [7:0]                         mx_scale_b_i,
   input logic                               vectorial_op_i,
-  input logic                               tag_i,
-  input logic [NumLanes-1:0]                simd_mask_i,
+  input TagType                             tag_i,
+  input MaskType                            simd_mask_i,
   // Input Handshake
   input  logic                              in_valid_i,
   output logic                              in_ready_o,
@@ -30,7 +42,7 @@ module transdot_fpu_top#(
   // Output signals
   output logic [WIDTH-1:0]                  result_o,
   output fpnew_pkg::status_t                status_o,
-  output logic                              tag_o,
+  output TagType                            tag_o,
   // Output handshake
   output logic                              out_valid_o,
   input  logic                              out_ready_i,
@@ -41,7 +53,7 @@ module transdot_fpu_top#(
 fpnew_top #(
   .Features       (Features),
   .Implementation (Implementation),
-  .TagType        (logic),
+  .TagType        (TagType),
   .DivSqrtSel     (DivSqrtSel),
   .TrueSIMDClass(TrueSIMDClass),
   .EnableSIMDMask(EnableSIMDMask)
@@ -55,6 +67,9 @@ fpnew_top #(
   .src_fmt_i,
   .dst_fmt_i,
   .int_fmt_i,
+  .mx_enable_i,
+  .mx_scale_a_i,
+  .mx_scale_b_i,
   .vectorial_op_i,
   .simd_mask_i,
   .tag_i,

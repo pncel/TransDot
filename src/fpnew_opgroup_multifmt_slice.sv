@@ -45,6 +45,13 @@ module fpnew_opgroup_multifmt_slice #(
   input fpnew_pkg::fp_format_e                    src_fmt_i,
   input fpnew_pkg::fp_format_e                    dst_fmt_i,
   input fpnew_pkg::int_format_e                   int_fmt_i,
+  // OCP MX sideband — forwarded straight into the ADDMUL lane FMA. The slice
+  // does NOT decode MX into tdot_*_enable expressions: MX rides the existing
+  // TDOT_FP4_DP_FMADD / TDOT_DP_FMADD opcodes, so dp_enable / fp4_enable are
+  // already correct. Only the scale data needs to flow.
+  input logic                                     mx_enable_i,
+  input logic [7:0]                               mx_scale_a_i,
+  input logic [7:0]                               mx_scale_b_i,
   input logic                                     vectorial_op_i,
   input TagType                                   tag_i,
   input MaskType                                  simd_mask_i,
@@ -128,9 +135,15 @@ FP8/FP4. Please use the PULP DivSqrt unit when in need of div/sqrt operations on
   assign tdot_simd_enable = fpnew_pkg::is_transdot_simd_op(op_i);
   assign tdot_fp4_enable  = 1'b0;
 `else
-  assign tdot_dp_enable   = fpnew_pkg::is_transdot_dp_op(op_i);
+  // INT_DP_FMADD reuses the FP DP geometry: dp_enable picks DP-vs-scalar (INT16 → scalar),
+  // fp4_enable picks FP8-DP shape (INT4) over FP16-DP shape (INT8).
+  assign tdot_dp_enable   = fpnew_pkg::is_transdot_dp_op(op_i)
+                            || (fpnew_pkg::is_int_dp_op(op_i)
+                                && (int_fmt_i != fpnew_pkg::INT16));
   assign tdot_simd_enable = fpnew_pkg::is_transdot_simd_op(op_i);
-  assign tdot_fp4_enable  = fpnew_pkg::is_transdot_fp4_op(op_i);
+  assign tdot_fp4_enable  = fpnew_pkg::is_transdot_fp4_op(op_i)
+                            || (fpnew_pkg::is_int_dp_op(op_i)
+                                && (int_fmt_i == fpnew_pkg::INT4));
 `endif
 
   // Cast-and-Pack ops are encoded in operation and modifier
@@ -266,6 +279,12 @@ FP8/FP4. Please use the PULP DivSqrt unit when in need of div/sqrt operations on
                              ? fpnew_pkg::FP8 : src_fmt_i ),
           .src2_fmt_i      ( op_i == fpnew_pkg::ADDS ? src_fmt_i : dst_fmt_i ),
           .dst_fmt_i,
+    `ifdef TRANSDOT_ENABLE
+          .int_fmt_i,
+          .mx_enable_i,
+          .mx_scale_a_i,
+          .mx_scale_b_i,
+    `endif
           .tag_i,
           .mask_i          ( simd_mask_i[lane]                               ),
           .aux_i           ( aux_data                                        ),

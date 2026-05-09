@@ -68,6 +68,14 @@ module transdot_decomp_exponent_datapath_fp8 #(
   input  logic                               simd_enable_i,
   input  logic                               fp4_enable_i,
 
+  // OCP MX (microscaling) sideband. When mx_enable_i=1, the per-block scale
+  // pair (mx_scale_a_i, mx_scale_b_i) is added into exp_product_lane0 as
+  // (s_A + s_B - 254). Both scales are E8M0 (unsigned 8-bit, biased 127).
+  // Active only when dp_enable_i=1 (FP4-DP / FP8-DP / FP16-DP geometry).
+  input  logic                               mx_enable_i,
+  input  logic [7:0]                         mx_scale_a_i,
+  input  logic [7:0]                         mx_scale_b_i,
+
   // ---------------- Outputs ----------------
   output logic signed [EXP_WIDTH-1:0]        exponent_addend_o,
   output logic signed [EXP_WIDTH-1:0]        exponent_product_o,
@@ -219,12 +227,19 @@ module transdot_decomp_exponent_datapath_fp8 #(
                 + exponent_b_fp8_2 + info_b_fp8_2_i.is_subnormal
                 + exponent_product_bias_offset);
 
-  // in dp mode, check which exponent is larger  
-  logic [5:0] reduced_exponent_product_lane0,reduced_exponent_product_lane1,reduced_exponent_product_lane2,reduced_exponent_product_lane3;
-  assign reduced_exponent_product_lane0 = (info_a_i.is_zero || info_b_i.is_zero) ? '0 : exponent_a[5:0] + exponent_b[5:0];
-  assign reduced_exponent_product_lane1 = (info_a_simd_i.is_zero || info_b_simd_i.is_zero) ? '0 : exponent_a_simd[5:0] + exponent_b_simd[5:0];
-  assign reduced_exponent_product_lane2 = (info_a_fp8_1_i.is_zero || info_b_fp8_1_i.is_zero) ? '0 : exponent_a_fp8_1[4:0] + exponent_b_fp8_1[4:0];
-  assign reduced_exponent_product_lane3 = (info_a_fp8_2_i.is_zero || info_b_fp8_2_i.is_zero) ? '0 : exponent_a_fp8_2[4:0] + exponent_b_fp8_2[4:0];
+  // in dp mode, check which exponent is larger
+  // Lane 0/1 carry FP16-DP / BF16-DP (8-bit biased exp; sum needs 9 b).
+  // Lane 2/3 carry FP8-DP only (4-bit biased exp; sum fits in 5 b — leave 6).
+  // The 6-b truncation that worked for FP16 (5-b biased exp) breaks BF16's
+  // 8-b biased exp, so widen the lane-0/1 reduced sums to SUPER_EXP_BITS+1.
+  localparam int unsigned RED_EXP_W_01  = SUPER_EXP_BITS + 1;       // 9 for SUPER_EXP_BITS=8
+  localparam int unsigned RED_EXP_W_23  = 6;
+  logic [RED_EXP_W_01-1:0] reduced_exponent_product_lane0, reduced_exponent_product_lane1;
+  logic [RED_EXP_W_23-1:0] reduced_exponent_product_lane2, reduced_exponent_product_lane3;
+  assign reduced_exponent_product_lane0 = (info_a_i.is_zero || info_b_i.is_zero)             ? '0 : exponent_a[SUPER_EXP_BITS-1:0]         + exponent_b[SUPER_EXP_BITS-1:0];
+  assign reduced_exponent_product_lane1 = (info_a_simd_i.is_zero || info_b_simd_i.is_zero)   ? '0 : exponent_a_simd[SUPER_EXP_BITS-1:0]    + exponent_b_simd[SUPER_EXP_BITS-1:0];
+  assign reduced_exponent_product_lane2 = (info_a_fp8_1_i.is_zero || info_b_fp8_1_i.is_zero) ? '0 : exponent_a_fp8_1[4:0]                  + exponent_b_fp8_1[4:0];
+  assign reduced_exponent_product_lane3 = (info_a_fp8_2_i.is_zero || info_b_fp8_2_i.is_zero) ? '0 : exponent_a_fp8_2[4:0]                  + exponent_b_fp8_2[4:0];
 
   logic larger_exp_product_flag_0_1;
   assign larger_exp_product_flag_0_1 = (reduced_exponent_product_lane0 > reduced_exponent_product_lane1) ? 1'b1 : 1'b0;
@@ -233,12 +248,17 @@ module transdot_decomp_exponent_datapath_fp8 #(
 
 
   logic signed [EXP_WIDTH-1:0] exp_product_lane0;
-  logic [5:0] large_exp_product_0_1,large_exp_product_2_3,reduced_large_exp_product;
+  logic [RED_EXP_W_01-1:0] large_exp_product_0_1;
+  logic [RED_EXP_W_23-1:0] large_exp_product_2_3;
+  logic [RED_EXP_W_01-1:0] reduced_large_exp_product;
   assign large_exp_product_0_1 = larger_exp_product_flag_0_1? reduced_exponent_product_lane0 : reduced_exponent_product_lane1;
   assign large_exp_product_2_3 = larger_exp_product_flag_2_3? reduced_exponent_product_lane2 : reduced_exponent_product_lane3;
 
   logic larger_exp_product_flag_group_0_1;
-  assign larger_exp_product_flag_group_0_1 = (src_fmt_i == fpnew_pkg::FP16)? 1'b1 : ((large_exp_product_0_1 > large_exp_product_2_3) ? 1'b1 : 1'b0);
+  // For FP16 / BF16 (FP16ALT) the FP8-DP lanes 2/3 are inactive (their
+  // fp8_1/fp8_2 decoders gate on fmt==FP8 only), so their reduced exponents
+  // are don't-cares and must not influence selection — force group 0_1.
+  assign larger_exp_product_flag_group_0_1 = (src_fmt_i == fpnew_pkg::FP16 || src_fmt_i == fpnew_pkg::FP16ALT) ? 1'b1 : ((large_exp_product_0_1 > large_exp_product_2_3) ? 1'b1 : 1'b0);
   //get the larger exp_product among 4 lanes
   assign reduced_large_exp_product = (larger_exp_product_flag_group_0_1) ? large_exp_product_0_1 : large_exp_product_2_3;
   
@@ -252,20 +272,52 @@ module transdot_decomp_exponent_datapath_fp8 #(
                               (larger_exp_sel==2'b01 ? exponent_product_fp8_1 : exponent_product_fp8_2));
 
   // DP path uses a 1-bit normalized mantissa sum in the multiplier.
-  assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? 9'd132 : (exp_product_largest + 1'b1))
+  // OCP MX: when mx_enable_i=1, fold the shared block scale into the product
+  // exponent: result *= 2^(s_A + s_B - 254). Range of the scale shift is
+  // [-254, +256], easily within signed EXP_WIDTH=10. mx_enable=0 leaves
+  // exp_product_lane0 bit-exact to the pre-MX behavior.
+  logic signed [EXP_WIDTH-1:0] mx_scale_shift;
+  assign mx_scale_shift = mx_enable_i
+                          ? signed'({2'b00, mx_scale_a_i})
+                            + signed'({2'b00, mx_scale_b_i})
+                            - 10'sd254
+                          : 10'sd0;
+
+  assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? (10'sd132 + mx_scale_shift)
+                                                         : (exp_product_largest + 10'sd1 + mx_scale_shift))
                                          : exponent_product;
 
-  logic signed [5:0] dp_e_diff0_s, dp_e_diff1_s, dp_e_diff2_s, dp_e_diff3_s;
-  assign dp_e_diff0_s = reduced_large_exp_product - reduced_exponent_product_lane0; // >= 0
-  assign dp_e_diff1_s = reduced_large_exp_product - reduced_exponent_product_lane1; // >= 0
-  assign dp_e_diff2_s = reduced_large_exp_product - reduced_exponent_product_lane2; // >= 0
-  assign dp_e_diff3_s = reduced_large_exp_product - reduced_exponent_product_lane3; // >= 0
+  // Lane-0/1 diffs widened to RED_EXP_W_01 to hold BF16's 8-b exp range
+  // (sum-of-two-biased-exps up to 510); FP16's 5-b case still fits.
+  // Lane-2/3 diffs widened to 7 b (signed) to hold FP8ALT's 5-b exp range
+  // (sum up to 60, diff up to ~60); FP8's 4-b exp case still fits.
+  logic signed [RED_EXP_W_01:0] dp_e_diff0_s, dp_e_diff1_s;
+  logic signed [6:0]            dp_e_diff2_s, dp_e_diff3_s;
+  assign dp_e_diff0_s = $signed({1'b0, reduced_large_exp_product}) - $signed({1'b0, reduced_exponent_product_lane0}); // >= 0
+  assign dp_e_diff1_s = $signed({1'b0, reduced_large_exp_product}) - $signed({1'b0, reduced_exponent_product_lane1}); // >= 0
+  assign dp_e_diff2_s = $signed({1'b0, reduced_large_exp_product[5:0]}) - $signed({1'b0, reduced_exponent_product_lane2}); // >= 0
+  assign dp_e_diff3_s = $signed({1'b0, reduced_large_exp_product[5:0]}) - $signed({1'b0, reduced_exponent_product_lane3}); // >= 0
+
+  // Max useful shift for each path — once the lagging product is shifted past
+  // this, it has been entirely shifted into sticky and contributes 0. Saturate
+  // here so wrap-around in the narrower shamt field cannot produce a small
+  // shift that aliases the smaller lane's product back into the partial sum.
+  localparam int unsigned MAX_DP_SHAMT_SIMD = 3 * PRECISION_BITS_SIMD + 4;
+  localparam int unsigned MAX_DP_SHAMT_FP8  = 3 * PRECISION_BITS_FP8  + 4;
 
   always_comb begin
-      dp_shamt0_o = dp_e_diff0_s[SHIFT_AMOUNT_WIDTH_SIMD-1:0];
-      dp_shamt1_o = dp_e_diff1_s[SHIFT_AMOUNT_WIDTH_SIMD-1:0];
-      dp_shamt2_o = dp_e_diff2_s[SHIFT_AMOUNT_WIDTH_FP8-1:0];
-      dp_shamt3_o = dp_e_diff3_s[SHIFT_AMOUNT_WIDTH_FP8-1:0]; 
+      dp_shamt0_o = (dp_e_diff0_s > $signed(MAX_DP_SHAMT_SIMD))
+                      ? MAX_DP_SHAMT_SIMD[SHIFT_AMOUNT_WIDTH_SIMD-1:0]
+                      : dp_e_diff0_s[SHIFT_AMOUNT_WIDTH_SIMD-1:0];
+      dp_shamt1_o = (dp_e_diff1_s > $signed(MAX_DP_SHAMT_SIMD))
+                      ? MAX_DP_SHAMT_SIMD[SHIFT_AMOUNT_WIDTH_SIMD-1:0]
+                      : dp_e_diff1_s[SHIFT_AMOUNT_WIDTH_SIMD-1:0];
+      dp_shamt2_o = (dp_e_diff2_s > $signed(MAX_DP_SHAMT_FP8))
+                      ? MAX_DP_SHAMT_FP8[SHIFT_AMOUNT_WIDTH_FP8-1:0]
+                      : dp_e_diff2_s[SHIFT_AMOUNT_WIDTH_FP8-1:0];
+      dp_shamt3_o = (dp_e_diff3_s > $signed(MAX_DP_SHAMT_FP8))
+                      ? MAX_DP_SHAMT_FP8[SHIFT_AMOUNT_WIDTH_FP8-1:0]
+                      : dp_e_diff3_s[SHIFT_AMOUNT_WIDTH_FP8-1:0];
   end
   
   // Difference in SIMD mode
@@ -312,7 +364,10 @@ module transdot_decomp_exponent_datapath_fp8 #(
       addend_shamt_super_small_precision = 0;
   end
 
-  assign addend_shamt = simd_enable_i ? (src_fmt_i==fpnew_pkg::FP8? addend_shamt_super_small_precision : addend_shamt_small_precision) : addend_shamt_large_precision;
+  // In SIMD k=4 mode, byte0 (this main lane) hosts an FP8-precision FMA when
+  // src_fmt is any FP8 variant (E4M3 or FP8ALT/E5M2 — both share the FP8 4-b
+  // mantissa-multiplier shape). Use the FP8 (super-small) shift width for both.
+  assign addend_shamt = simd_enable_i ? ((src_fmt_i==fpnew_pkg::FP8 || src_fmt_i==fpnew_pkg::FP8ALT) ? addend_shamt_super_small_precision : addend_shamt_small_precision) : addend_shamt_large_precision;
 
   always_comb begin : addend_shift_amount_simd
     if (exponent_difference_simd <= signed'(-2 * PRECISION_BITS_SIMD - 1)) //smaller than -23
@@ -337,7 +392,8 @@ module transdot_decomp_exponent_datapath_fp8 #(
       // addend larger: no shift needed
       addend_shamt_super_small_precision_simd = 0;
   end
-  assign addend_shamt_simd = (src_fmt_i==fpnew_pkg::FP8)? addend_shamt_super_small_precision_simd : addend_shamt_small_precision_simd;
+  // Same rule for byte2 (this SIMD lane): FP8 or FP8ALT both pick the FP8 shift width.
+  assign addend_shamt_simd = ((src_fmt_i==fpnew_pkg::FP8) || (src_fmt_i==fpnew_pkg::FP8ALT)) ? addend_shamt_super_small_precision_simd : addend_shamt_small_precision_simd;
 
   always_comb begin : addend_shift_amount_fp8_1
     if (exponent_difference_fp8_1 <= signed'(-2 * PRECISION_BITS_FP8 - 1))

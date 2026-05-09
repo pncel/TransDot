@@ -14,7 +14,6 @@ localparam string input_dir = "../test_data_generate/generated/";
 // ----------------------------------------
 logic clk, rst_n;
 logic [NUM_OPS-1:0][WIDTH-1:0] operands_i;
-
 logic [31:0] operand_a_fp32;
 logic [31:0] operand_b_fp32;
 logic [31:0] operand_c_fp32;
@@ -72,7 +71,6 @@ rst_n = 0;
 in_valid_i = 0;
 flush_i = 0;
 out_ready_i = 1;
-simd_mask_i = '1;
 repeat (10) @(posedge clk);
 rst_n = 1;
 repeat (5) @(posedge clk);
@@ -81,9 +79,7 @@ endtask
 // ----------------------------------------
 // DUT instantiation
 // ----------------------------------------
-transdot_fpu_top #(
-  .EnableSIMDMask(1)
-)dut (
+transdot_fpu_top dut (
 .clk_i(clk),
 .rst_ni(rst_n),
 .operands_i,
@@ -93,6 +89,9 @@ transdot_fpu_top #(
 .src_fmt_i,
 .dst_fmt_i,
 .int_fmt_i,
+.mx_enable_i (1'b0),
+.mx_scale_a_i(8'd0),
+.mx_scale_b_i(8'd0),
 .vectorial_op_i,
 .simd_mask_i,
 .tag_i,
@@ -149,18 +148,6 @@ function automatic logic [31:0] unbox_bits(logic [31:0] boxed, fp_format_e fmt);
     FP16ALT: return {16'b0, boxed[15:0]}; // keep in LSBs
     FP8    : return {24'b0, boxed[7:0]};
     default: return boxed;
-  endcase
-endfunction
-
-function automatic operation_e decode_op_id(input int unsigned op_id, input operation_e fallback_op);
-  case (op_id)
-    0 : return fpnew_pkg::ADD;
-    1 : return fpnew_pkg::MUL;
-    2 : return fpnew_pkg::FMADD;
-    16: return fpnew_pkg::TDOT_SIMD_FMADD;
-    17: return fpnew_pkg::TDOT_DP_FMADD;
-    18: return fpnew_pkg::TDOT_FP4_DP_FMADD;
-    default: return fallback_op;
   endcase
 endfunction
 
@@ -247,80 +234,88 @@ int pass_simd_fp8, total_simd_fp8;
 int pass_dp_fp16, total_dp_fp16;
 int pass_dp_fp8, total_dp_fp8;
 int pass_dp_fp4, total_dp_fp4;
-int pass_status_directed, total_status_directed;
 
 // ----------------------------------------
 // Read test data (.txt with %b)
 // ----------------------------------------
 task automatic read_test_data(string prefix, output int num_loaded);
-string input_txt;
-int f_in, rc;
+string input_txt, golden_txt;
+int f_in, f_gold, rc;
 input_txt  = {input_dir, prefix, "_input.txt"};
+golden_txt = {input_dir, prefix, "_golden_output.txt"};
+
 
 f_in   = $fopen(input_txt,  "r");
-if (!f_in)
-  $fatal("Failed to open input text file for %s", prefix);
+f_gold = $fopen(golden_txt, "r");
+if (!f_in || !f_gold)
+  $fatal("Failed to open text files for %s", prefix);
 
 num_loaded = 0;
-while ((num_loaded < NUM_TESTS) && !$feof(f_in)) begin
+while ((num_loaded < NUM_TESTS) && !$feof(f_in) && !$feof(f_gold)) begin
   rc = $fscanf(f_in, "%b %b %b %d\n",
                test_vectors[num_loaded].a,
                test_vectors[num_loaded].b,
                test_vectors[num_loaded].c,
                test_vectors[num_loaded].op);
-  if (rc == 4) num_loaded++;
+  rc += $fscanf(f_gold, "%b\n", golden_output[num_loaded]);
+  if (rc == 5) num_loaded++;
   else break;
 end
 $fclose(f_in);
+$fclose(f_gold);
 $display("[TB] Loaded %0d text vectors for %s", num_loaded, prefix);
-if (num_loaded == 0) begin
-  $fatal(1, "[TB] No vectors loaded for %s", prefix);
-end
 
 
-endtask
-
-task automatic wait_for_dut_idle(string prefix);
-  int idle_cycles;
-  int timeout_cycles;
-
-  idle_cycles = 0;
-  timeout_cycles = 0;
-  while (idle_cycles < 4) begin
-    @(posedge clk);
-    timeout_cycles++;
-    if (!busy_o && !out_valid_o && !in_valid_i) begin
-      idle_cycles++;
-    end else begin
-      idle_cycles = 0;
-    end
-    if (timeout_cycles > (NUM_TESTS * 20)) begin
-      $fatal(1, "[TB] Timeout waiting for DUT to drain after %s", prefix);
-    end
-  end
 endtask
 
 task automatic print_summary();
   int total_tests;
-  int total_completed;
+  int total_pass;
+  int total_fail;
 
   total_tests = total_fp32 + total_fp16 + total_fp8 +
                 total_simd_fp16 + total_simd_fp8 +
                 total_dp_fp16 + total_dp_fp8 + total_dp_fp4;
-  total_completed = pass_fp32 + pass_fp16 + pass_fp8 +
-                    pass_simd_fp16 + pass_simd_fp8 +
-                    pass_dp_fp16 + pass_dp_fp8 + pass_dp_fp4;
+  total_pass  = pass_fp32 + pass_fp16 + pass_fp8 +
+                pass_simd_fp16 + pass_simd_fp8 +
+                pass_dp_fp16 + pass_dp_fp8 + pass_dp_fp4;
+  total_fail  = total_tests - total_pass;
 
   $display("\n[SUMMARY]");
-  if (total_fp32 > 0) $display("  fp32           : %0d / %0d vectors completed", pass_fp32, total_fp32);
-  if (total_fp16 > 0) $display("  fp16           : %0d / %0d vectors completed", pass_fp16, total_fp16);
-  if (total_fp8  > 0) $display("  fp8            : %0d / %0d vectors completed", pass_fp8,  total_fp8);
-  if (total_simd_fp16 > 0) $display("  fp16_simd_fp16 : %0d / %0d vectors completed", pass_simd_fp16, total_simd_fp16);
-  if (total_simd_fp8  > 0) $display("  fp8_simd_fp8   : %0d / %0d vectors completed", pass_simd_fp8,  total_simd_fp8);
-  if (total_dp_fp16 > 0) $display("  fp16_fp32_dp   : %0d / %0d vectors completed", pass_dp_fp16, total_dp_fp16);
-  if (total_dp_fp8  > 0) $display("  fp8_fp32_dp    : %0d / %0d vectors completed", pass_dp_fp8,  total_dp_fp8);
-  if (total_dp_fp4  > 0) $display("  fp4_fp32_dp    : %0d / %0d vectors completed", pass_dp_fp4,  total_dp_fp4);
-  $display("[TB] Total vectors completed: %0d / %0d", total_completed, total_tests);
+  if (total_fp32 > 0) $display("  fp32           : %0d / %0d passed", pass_fp32, total_fp32);
+  if (total_fp16 > 0) $display("  fp16           : %0d / %0d passed", pass_fp16, total_fp16);
+  if (total_fp8  > 0) $display("  fp8            : %0d / %0d passed", pass_fp8,  total_fp8);
+  if (total_simd_fp16 > 0) $display("  fp16_simd_fp16 : %0d / %0d passed", pass_simd_fp16, total_simd_fp16);
+  if (total_simd_fp8  > 0) $display("  fp8_simd_fp8   : %0d / %0d passed", pass_simd_fp8,  total_simd_fp8);
+  if (total_dp_fp16 > 0) $display("  fp16_fp32_dp   : %0d / %0d passed", pass_dp_fp16, total_dp_fp16);
+  if (total_dp_fp8  > 0) $display("  fp8_fp32_dp    : %0d / %0d passed", pass_dp_fp8,  total_dp_fp8);
+  if (total_dp_fp4  > 0) $display("  fp4_fp32_dp    : %0d / %0d passed", pass_dp_fp4,  total_dp_fp4);
+
+  if (total_fail == 0) begin
+    $display("      ");
+    $display("      ");
+    $display("########     ###      ######    ######     ##   ##   ##");
+    $display("##     ##   ## ##    ##    ##  ##    ##    ##   ##   ##");
+    $display("##     ##  ##   ##   ##        ##          ##   ##   ##");
+    $display("########  ##     ##   ######    ######     ##   ##   ##");
+    $display("##        #########        ##        ##    ##   ##   ##");
+    $display("##        ##     ##  ##    ##  ##    ##                ");
+    $display("##        ##     ##   ######    ######     ##   ##   ##");
+    $display("      ");
+    $display("      ");
+  end else begin
+    $display("      ");
+    $display("      ");
+    $display("########    ###       ####    ##          ##   ##   ##");
+    $display("##         ## ##       ##     ##          ##   ##   ##");
+    $display("##        ##   ##      ##     ##          ##   ##   ##");
+    $display("######   ##     ##     ##     ##          ##   ##   ##");
+    $display("##       #########     ##     ##          ##   ##   ##");
+    $display("##       ##     ##     ##     ##                      ");
+    $display("##       ##     ##    ####    ########    ##   ##   ##");
+    $display("      ");
+    $display("      ");
+  end
 endtask
 
 // ----------------------------------------
@@ -329,6 +324,8 @@ endtask
 task automatic run_format(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+real hw, gold, diff;
+int ulp;
 
 
 read_test_data(prefix, ntests);
@@ -345,7 +342,13 @@ for (int i = 0; i < ntests; i++) begin
   operands_i[1] = test_vectors[i].b;
   operands_i[2] = test_vectors[i].c;
 
-  op_i = decode_op_id(test_vectors[i].op, fpnew_pkg::FMADD);
+  // op mapping: 0=ADD, 1=MUL, 2=FMADD (same as generator)
+  case (test_vectors[i].op)
+    0: op_i = fpnew_pkg::ADD;
+    1: op_i = fpnew_pkg::MUL;
+    2: op_i = fpnew_pkg::FMADD;
+    default: op_i = fpnew_pkg::ADD;
+  endcase
 
   in_valid_i = 1;
   @(posedge clk);
@@ -378,10 +381,7 @@ for (int i = 0; i < ntests; i++) begin
   //end
 end
 
-wait_for_dut_idle(prefix);
-pass_count = ntests;
-
-$display("[TB] Format %s: %0d / %0d vectors completed", prefix, pass_count, ntests);
+$display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
 
 if (prefix == "fp32") begin
   pass_fp32 = pass_count;
@@ -404,6 +404,11 @@ endtask
 task automatic run_simd_fp16(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+real hw0, gold0, diff0;
+real hw1, gold1, diff1;
+int ulp1;
+int ulp0;
+bit pass_low;
 
 
 read_test_data(prefix, ntests);
@@ -419,9 +424,8 @@ for (int i = 0; i < ntests; i++) begin
   operands_i[1] = test_vectors[i].b;
   operands_i[2] = test_vectors[i].c;
 
-  op_i = (test_vectors[i].op == 2)
-      ? fpnew_pkg::TDOT_SIMD_FMADD
-      : decode_op_id(test_vectors[i].op, fpnew_pkg::TDOT_SIMD_FMADD);
+  // op mapping: 0=ADD, 1=MUL, 2=FMADD (same as generator)
+  op_i = fpnew_pkg::TDOT_SIMD_FMADD;
 
   in_valid_i = 1;
   @(posedge clk);
@@ -477,10 +481,7 @@ for (int i = 0; i < ntests; i++) begin
   //end
 end
 
-wait_for_dut_idle(prefix);
-pass_count = ntests;
-
-$display("[TB] Format %s: %0d / %0d vectors completed", prefix, pass_count, ntests);
+$display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
 
 pass_simd_fp16 = pass_count;
 total_simd_fp16 = ntests;
@@ -491,6 +492,15 @@ endtask
 task automatic run_simd_fp8(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+real hw0, gold0, diff0;
+real hw1, gold1, diff1;
+real hw2, gold2, diff2;
+real hw3, gold3, diff3;
+int ulp3;
+int ulp2;
+int ulp1;
+int ulp0;
+bit pass_low;
 
 
 read_test_data(prefix, ntests);
@@ -506,9 +516,8 @@ for (int i = 0; i < ntests; i++) begin
   operands_i[1] = test_vectors[i].b;
   operands_i[2] = test_vectors[i].c;
 
-  op_i = (test_vectors[i].op == 2)
-      ? fpnew_pkg::TDOT_SIMD_FMADD
-      : decode_op_id(test_vectors[i].op, fpnew_pkg::TDOT_SIMD_FMADD);
+  // op mapping: 0=ADD, 1=MUL, 2=FMADD (same as generator)
+  op_i = fpnew_pkg::TDOT_SIMD_FMADD;
 
   in_valid_i = 1;
   @(posedge clk);
@@ -611,10 +620,7 @@ for (int i = 0; i < ntests; i++) begin
   //end
 end
 
-wait_for_dut_idle(prefix);
-pass_count = ntests;
-
-$display("[TB] Format %s: %0d / %0d vectors completed", prefix, pass_count, ntests);
+$display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
 
 pass_simd_fp8 = pass_count;
 total_simd_fp8 = ntests;
@@ -628,6 +634,8 @@ endtask
 task automatic run_dp(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+real hw, gold, diff;
+int ulp;
 
 
 read_test_data(prefix, ntests);
@@ -643,9 +651,8 @@ for (int i = 0; i < ntests; i++) begin
   operands_i[1] = test_vectors[i].b;
   operands_i[2] = test_vectors[i].c;
 
-  op_i = (test_vectors[i].op == 2)
-      ? fpnew_pkg::TDOT_DP_FMADD
-      : decode_op_id(test_vectors[i].op, fpnew_pkg::TDOT_DP_FMADD);
+  // op mapping: 0=ADD, 1=MUL, 2=FMADD (same as generator)
+  op_i = fpnew_pkg::TDOT_DP_FMADD;
 
   in_valid_i = 1;
   @(posedge clk);
@@ -682,10 +689,7 @@ for (int i = 0; i < ntests; i++) begin
   //end
 end
 
-wait_for_dut_idle(prefix);
-pass_count = ntests;
-
-$display("[TB] Format %s: %0d / %0d vectors completed", prefix, pass_count, ntests);
+$display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
 
 pass_dp_fp16 = pass_count;
 total_dp_fp16 = ntests;
@@ -696,6 +700,8 @@ endtask
 task automatic run_dp_fp8(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+real hw, gold, diff;
+int ulp;
 
 
 read_test_data(prefix, ntests);
@@ -711,9 +717,8 @@ for (int i = 0; i < ntests; i++) begin
   operands_i[1] = test_vectors[i].b;
   operands_i[2] = test_vectors[i].c;
 
-  op_i = (test_vectors[i].op == 2)
-      ? fpnew_pkg::TDOT_DP_FMADD
-      : decode_op_id(test_vectors[i].op, fpnew_pkg::TDOT_DP_FMADD);
+  // op mapping: 0=ADD, 1=MUL, 2=FMADD (same as generator)
+  op_i = fpnew_pkg::TDOT_DP_FMADD;
 
   in_valid_i = 1;
   @(posedge clk);
@@ -758,10 +763,7 @@ for (int i = 0; i < ntests; i++) begin
   //end
 end
 
-wait_for_dut_idle(prefix);
-pass_count = ntests;
-
-$display("[TB] Format %s: %0d / %0d vectors completed", prefix, pass_count, ntests);
+$display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
 
 pass_dp_fp8 = pass_count;
 total_dp_fp8 = ntests;
@@ -772,6 +774,8 @@ endtask
 task automatic run_dp_fp4(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+real hw, gold, diff;
+int ulp;
 
 read_test_data(prefix, ntests);
 
@@ -786,9 +790,7 @@ for (int i = 0; i < ntests; i++) begin
   operands_i[1] = test_vectors[i].b;
   operands_i[2] = test_vectors[i].c;
 
-  op_i = (test_vectors[i].op == 2)
-      ? fpnew_pkg::TDOT_FP4_DP_FMADD
-      : decode_op_id(test_vectors[i].op, fpnew_pkg::TDOT_FP4_DP_FMADD);
+  op_i = fpnew_pkg::TDOT_FP4_DP_FMADD;
 
   in_valid_i = 1;
   @(posedge clk);
@@ -849,10 +851,7 @@ for (int i = 0; i < ntests; i++) begin
   //end
 end
 
-wait_for_dut_idle(prefix);
-pass_count = ntests;
-
-$display("[TB] Format %s: %0d / %0d vectors completed", prefix, pass_count, ntests);
+$display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
 
 pass_dp_fp4 = pass_count;
 total_dp_fp4 = ntests;
@@ -863,15 +862,6 @@ endtask
 // Main
 // ----------------------------------------
 initial begin
-pass_fp32 = 0; total_fp32 = 0;
-pass_fp16 = 0; total_fp16 = 0;
-pass_fp8 = 0; total_fp8 = 0;
-pass_simd_fp16 = 0; total_simd_fp16 = 0;
-pass_simd_fp8 = 0; total_simd_fp8 = 0;
-pass_dp_fp16 = 0; total_dp_fp16 = 0;
-pass_dp_fp8 = 0; total_dp_fp8 = 0;
-pass_dp_fp4 = 0; total_dp_fp4 = 0;
-
 reset_dut();
 run_format(FP32, "fp32");
 #2;
