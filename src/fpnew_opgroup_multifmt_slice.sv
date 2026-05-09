@@ -45,13 +45,6 @@ module fpnew_opgroup_multifmt_slice #(
   input fpnew_pkg::fp_format_e                    src_fmt_i,
   input fpnew_pkg::fp_format_e                    dst_fmt_i,
   input fpnew_pkg::int_format_e                   int_fmt_i,
-  // OCP MX sideband — forwarded straight into the ADDMUL lane FMA. The slice
-  // does NOT decode MX into tdot_*_enable expressions: MX rides the existing
-  // TDOT_FP4_DP_FMADD / TDOT_DP_FMADD opcodes, so dp_enable / fp4_enable are
-  // already correct. Only the scale data needs to flow.
-  input logic                                     mx_enable_i,
-  input logic [7:0]                               mx_scale_a_i,
-  input logic [7:0]                               mx_scale_b_i,
   input logic                                     vectorial_op_i,
   input TagType                                   tag_i,
   input MaskType                                  simd_mask_i,
@@ -281,9 +274,6 @@ FP8/FP4. Please use the PULP DivSqrt unit when in need of div/sqrt operations on
           .dst_fmt_i,
     `ifdef TRANSDOT_ENABLE
           .int_fmt_i,
-          .mx_enable_i,
-          .mx_scale_a_i,
-          .mx_scale_b_i,
     `endif
           .tag_i,
           .mask_i          ( simd_mask_i[lane]                               ),

@@ -95,10 +95,6 @@ transdot_fpu_top #(
 .src_fmt_i,
 .dst_fmt_i,
 .int_fmt_i,
-// MX sideband — TB doesn't exercise MX yet; tie off.
-.mx_enable_i (1'b0),
-.mx_scale_a_i(8'd0),
-.mx_scale_b_i(8'd0),
 .vectorial_op_i,
 .simd_mask_i,
 .tag_i,

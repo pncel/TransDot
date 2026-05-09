@@ -25,13 +25,6 @@ module transdot_fpu_top#(
   input fpnew_pkg::fp_format_e              src_fmt_i,
   input fpnew_pkg::fp_format_e              dst_fmt_i,
   input fpnew_pkg::int_format_e             int_fmt_i,
-  // OCP MX (microscaling) sideband: when mx_enable_i is asserted, the FMA
-  // multiplies the standard FP4/FP8 DP result by 2^(mx_scale_a_i + mx_scale_b_i - 254),
-  // i.e. the shared E8M0 block-scale pair. mx_enable_i=0 reproduces the
-  // pre-MX behavior bit-exact. See mxfp4_mxfp8_plans.md for context.
-  input logic                               mx_enable_i,
-  input logic [7:0]                         mx_scale_a_i,
-  input logic [7:0]                         mx_scale_b_i,
   input logic                               vectorial_op_i,
   input TagType                             tag_i,
   input MaskType                            simd_mask_i,
@@ -67,9 +60,6 @@ fpnew_top #(
   .src_fmt_i,
   .dst_fmt_i,
   .int_fmt_i,
-  .mx_enable_i,
-  .mx_scale_a_i,
-  .mx_scale_b_i,
   .vectorial_op_i,
   .simd_mask_i,
   .tag_i,

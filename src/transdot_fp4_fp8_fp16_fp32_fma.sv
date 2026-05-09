@@ -38,14 +38,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   input  fpnew_pkg::fp_format_e       src2_fmt_i, // format of the addend
   input  fpnew_pkg::fp_format_e       dst_fmt_i,  // format of the result
   input  fpnew_pkg::int_format_e      int_fmt_i,  // INT lane width when op_i == INT_DP_FMADD
-  // OCP MX sideband. mx_enable_i=1 augments the FP4-DP / FP8-DP / FP16-DP
-  // path with a shared E8M0 block scale: result *= 2^(scale_a + scale_b - 254).
-  // Scales are E8M0 (unsigned 8 b power-of-two; bias 127). mx_enable_i=0 is a
-  // no-op — bit-exact to pre-MX behavior. Phase A+B port plumbing only;
-  // exp-datapath consumer is wired in Phase D.
-  input  logic                        mx_enable_i,
-  input  logic [7:0]                  mx_scale_a_i,
-  input  logic [7:0]                  mx_scale_b_i,
   input  TagType                      tag_i,
   input  logic                        mask_i,
   input  AuxType                      aux_i,
@@ -185,11 +177,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic                                         inp_pipe_dp_enable_q;
   logic                                         inp_pipe_fp4_enable_q;
   fpnew_pkg::int_format_e                       inp_pipe_int_fmt_q;
-  // MX sideband (Phase A+B): plumbed but not yet consumed.
-  logic                                         inp_pipe_mx_enable_q;
-  logic [7:0]                                   inp_pipe_mx_scale_a_q;
-  logic [7:0]                                   inp_pipe_mx_scale_b_q;
-
   // Forward-declared so the DEBUG_INT_DP $display block (further down) can
   // reference them. Drivers and wrapper output connection live near the
   // multiplier instantiation below.
@@ -231,9 +218,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src2_fmt_i(src2_fmt_i),
         .dst_fmt_i(dst_fmt_i),
         .int_fmt_i(int_fmt_i),
-        .mx_enable_i(mx_enable_i),
-        .mx_scale_a_i(mx_scale_a_i),
-        .mx_scale_b_i(mx_scale_b_i),
         .tag_i(tag_i),
         .mask_i(mask_i),
         .simd_enable_i(simd_enable_i),
@@ -250,9 +234,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src2_fmt_o(src2_fmt_q),
         .dst_fmt_o(dst_fmt_q),
         .int_fmt_o(inp_pipe_int_fmt_q),
-        .mx_enable_o(inp_pipe_mx_enable_q),
-        .mx_scale_a_o(inp_pipe_mx_scale_a_q),
-        .mx_scale_b_o(inp_pipe_mx_scale_b_q),
         .rnd_mode_o(inp_pipe_rnd_mode_q),
         .op_o(inp_pipe_op_q),
         .op_mod_o(inp_pipe_op_mod_q),
@@ -285,9 +266,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src2_fmt_i(src2_fmt_i),
         .dst_fmt_i(dst_fmt_i),
         .int_fmt_i(int_fmt_i),
-        .mx_enable_i(mx_enable_i),
-        .mx_scale_a_i(mx_scale_a_i),
-        .mx_scale_b_i(mx_scale_b_i),
         .tag_i(tag_i),
         .mask_i(mask_i),
         .simd_enable_i(simd_enable_i),
@@ -304,9 +282,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
         .src2_fmt_o(src2_fmt_q),
         .dst_fmt_o(dst_fmt_q),
         .int_fmt_o(inp_pipe_int_fmt_q),
-        .mx_enable_o(inp_pipe_mx_enable_q),
-        .mx_scale_a_o(inp_pipe_mx_scale_a_q),
-        .mx_scale_b_o(inp_pipe_mx_scale_b_q),
         .rnd_mode_o(inp_pipe_rnd_mode_q),
         .op_o(inp_pipe_op_q),
         .op_mod_o(inp_pipe_op_mod_q),
@@ -503,27 +478,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     if (post_norm_int_op_q) begin
       $display("[DBG_INT_DP_POST] t=%0t  post_norm_int_result=%0d (%h)",
                $time, post_norm_int_result_q, post_norm_int_result_q);
-    end
-  end
-`endif
-
-`ifdef DEBUG_MX_DP
-  // OCP MX (microscaling) verification harness. Fires whenever
-  // inp_pipe_mx_enable_q is set, dumping the scale pair and the surrounding
-  // FP4-DP / FP8-DP context. Phase D will add a second always_ff block that
-  // dumps exp_product_lane0 once the scale-add lands. Compile-gate with
-  // +define+DEBUG_MX_DP.
-  always_ff @(posedge clk_i) begin
-    if (inp_pipe_valid_q && inp_pipe_mx_enable_q) begin
-      $display("[DBG_MX_DP] t=%0t  op=%s  src_fmt=%s  dp_en=%0b  fp4_en=%0b",
-               $time, inp_pipe_op_q.name(), src_fmt_q.name(),
-               inp_pipe_dp_enable_q, inp_pipe_fp4_enable_q);
-      $display("[DBG_MX_DP]   scale_a=%0d (E8M0=2^%0d)  scale_b=%0d (E8M0=2^%0d)  combined_shift=%0d",
-               inp_pipe_mx_scale_a_q, $signed({1'b0,inp_pipe_mx_scale_a_q}) - 9'sd127,
-               inp_pipe_mx_scale_b_q, $signed({1'b0,inp_pipe_mx_scale_b_q}) - 9'sd127,
-               $signed({1'b0,inp_pipe_mx_scale_a_q}) + $signed({1'b0,inp_pipe_mx_scale_b_q}) - 10'sd254);
-      $display("[DBG_MX_DP]   operands_q[0]=%h operands_q[1]=%h operands_q[2]=%h",
-               operands_q[0], operands_q[1], operands_q[2]);
     end
   end
 `endif
@@ -1185,11 +1139,6 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .dp_enable_i     ( inp_pipe_dp_enable_q ),
     .simd_enable_i   ( inp_pipe_simd_enable_q ),
     .fp4_enable_i   ( inp_pipe_fp4_enable_q ),
-
-    // OCP MX scale folded into exp_product_lane0 inside the exp datapath.
-    .mx_enable_i    ( inp_pipe_mx_enable_q  ),
-    .mx_scale_a_i   ( inp_pipe_mx_scale_a_q ),
-    .mx_scale_b_i   ( inp_pipe_mx_scale_b_q ),
 
     .exponent_addend_o(exponent_addend),
     .exponent_product_o(exponent_product),
@@ -2668,9 +2617,6 @@ module transdot_input_pipeline_skip #(
   input  fpnew_pkg::fp_format_e         src2_fmt_i,
   input  fpnew_pkg::fp_format_e         dst_fmt_i,
   input  fpnew_pkg::int_format_e        int_fmt_i,
-  input  logic                          mx_enable_i,
-  input  logic [7:0]                    mx_scale_a_i,
-  input  logic [7:0]                    mx_scale_b_i,
   input  TagType                        tag_i,
   input  logic                          mask_i,
   input  logic                          simd_enable_i,
@@ -2693,9 +2639,6 @@ module transdot_input_pipeline_skip #(
   output fpnew_pkg::fp_format_e         src2_fmt_o,
   output fpnew_pkg::fp_format_e         dst_fmt_o,
   output fpnew_pkg::int_format_e        int_fmt_o,
-  output logic                          mx_enable_o,
-  output logic [7:0]                    mx_scale_a_o,
-  output logic [7:0]                    mx_scale_b_o,
   output fpnew_pkg::roundmode_e         rnd_mode_o,
   output fpnew_pkg::operation_e         op_o,
   output logic                          op_mod_o,
@@ -2714,9 +2657,6 @@ module transdot_input_pipeline_skip #(
   assign src2_fmt_o = src2_fmt_i;
   assign dst_fmt_o  = dst_fmt_i;
   assign int_fmt_o  = int_fmt_i;
-  assign mx_enable_o  = mx_enable_i;
-  assign mx_scale_a_o = mx_scale_a_i;
-  assign mx_scale_b_o = mx_scale_b_i;
   assign rnd_mode_o = rnd_mode_i;
   assign op_o       = op_i;
   assign op_mod_o   = op_mod_i;
@@ -2753,9 +2693,6 @@ module transdot_input_pipeline #(
   input  fpnew_pkg::fp_format_e         src2_fmt_i,
   input  fpnew_pkg::fp_format_e         dst_fmt_i,
   input  fpnew_pkg::int_format_e        int_fmt_i,
-  input  logic                          mx_enable_i,
-  input  logic [7:0]                    mx_scale_a_i,
-  input  logic [7:0]                    mx_scale_b_i,
   input  TagType                        tag_i,
   input  logic                          mask_i,
   input  logic                          simd_enable_i,
@@ -2778,9 +2715,6 @@ module transdot_input_pipeline #(
   output fpnew_pkg::fp_format_e         src2_fmt_o,
   output fpnew_pkg::fp_format_e         dst_fmt_o,
   output fpnew_pkg::int_format_e        int_fmt_o,
-  output logic                          mx_enable_o,
-  output logic [7:0]                    mx_scale_a_o,
-  output logic [7:0]                    mx_scale_b_o,
   output fpnew_pkg::roundmode_e         rnd_mode_o,
   output fpnew_pkg::operation_e         op_o,
   output logic                          op_mod_o,
@@ -2805,9 +2739,6 @@ module transdot_input_pipeline #(
   fpnew_pkg::fp_format_e [0:NUM_INP_REGS]                       inp_pipe_src2_fmt_q;
   fpnew_pkg::fp_format_e [0:NUM_INP_REGS]                       inp_pipe_dst_fmt_q;
   fpnew_pkg::int_format_e [0:NUM_INP_REGS]                      inp_pipe_int_fmt_q;
-  logic                  [0:NUM_INP_REGS]                       inp_pipe_mx_enable_q;
-  logic                  [0:NUM_INP_REGS][7:0]                  inp_pipe_mx_scale_a_q;
-  logic                  [0:NUM_INP_REGS][7:0]                  inp_pipe_mx_scale_b_q;
   TagType                [0:NUM_INP_REGS]                       inp_pipe_tag_q;
   logic                  [0:NUM_INP_REGS]                       inp_pipe_mask_q;
   logic                  [0:NUM_INP_REGS]                       inp_pipe_simd_enable_q;
@@ -2827,9 +2758,6 @@ module transdot_input_pipeline #(
   assign inp_pipe_src2_fmt_q[0] = src2_fmt_i;
   assign inp_pipe_dst_fmt_q[0]  = dst_fmt_i;
   assign inp_pipe_int_fmt_q[0]  = int_fmt_i;
-  assign inp_pipe_mx_enable_q[0]  = mx_enable_i;
-  assign inp_pipe_mx_scale_a_q[0] = mx_scale_a_i;
-  assign inp_pipe_mx_scale_b_q[0] = mx_scale_b_i;
   assign inp_pipe_tag_q[0]      = tag_i;
   assign inp_pipe_mask_q[0]     = mask_i;
   assign inp_pipe_simd_enable_q[0] = simd_enable_i;
@@ -2870,9 +2798,6 @@ module transdot_input_pipeline #(
     `FFL(inp_pipe_src2_fmt_q[i+1], inp_pipe_src2_fmt_q[i], reg_ena, fpnew_pkg::fp_format_e'(0))
     `FFL(inp_pipe_dst_fmt_q[i+1],  inp_pipe_dst_fmt_q[i],  reg_ena, fpnew_pkg::fp_format_e'(0))
     `FFL(inp_pipe_int_fmt_q[i+1],  inp_pipe_int_fmt_q[i],  reg_ena, fpnew_pkg::int_format_e'(0))
-    `FFL(inp_pipe_mx_enable_q[i+1],  inp_pipe_mx_enable_q[i],  reg_ena, 1'b0)
-    `FFL(inp_pipe_mx_scale_a_q[i+1], inp_pipe_mx_scale_a_q[i], reg_ena, 8'd0)
-    `FFL(inp_pipe_mx_scale_b_q[i+1], inp_pipe_mx_scale_b_q[i], reg_ena, 8'd0)
     `FFL(inp_pipe_tag_q[i+1],      inp_pipe_tag_q[i],      reg_ena, TagType'('0))
     `FFL(inp_pipe_mask_q[i+1],     inp_pipe_mask_q[i],     reg_ena, '0)
     `FFL(inp_pipe_simd_enable_q[i+1], inp_pipe_simd_enable_q[i], reg_ena, 1'b0)
@@ -2890,9 +2815,6 @@ module transdot_input_pipeline #(
   assign src2_fmt_o = inp_pipe_src2_fmt_q[NUM_INP_REGS];
   assign dst_fmt_o  = inp_pipe_dst_fmt_q[NUM_INP_REGS];
   assign int_fmt_o  = inp_pipe_int_fmt_q[NUM_INP_REGS];
-  assign mx_enable_o  = inp_pipe_mx_enable_q[NUM_INP_REGS];
-  assign mx_scale_a_o = inp_pipe_mx_scale_a_q[NUM_INP_REGS];
-  assign mx_scale_b_o = inp_pipe_mx_scale_b_q[NUM_INP_REGS];
   assign rnd_mode_o = inp_pipe_rnd_mode_q[NUM_INP_REGS];
   assign op_o       = inp_pipe_op_q[NUM_INP_REGS];
   assign op_mod_o   = inp_pipe_op_mod_q[NUM_INP_REGS];

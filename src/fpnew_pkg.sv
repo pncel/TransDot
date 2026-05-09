@@ -681,16 +681,6 @@ package fpnew_pkg;
     return (op == INT_DP_FMADD);
   endfunction
 
-  // Placeholder for the OCP MX DP path: today MXFP4/MXFP8 ride the existing
-  // TDOT_FP4_DP_FMADD / TDOT_DP_FMADD opcodes with a sideband mx_enable_i,
-  // so this returns 0. Promoted to a real check once Phase G migrates the
-  // sideband to dedicated MX_*_DP_FMADD opcodes.
-  function automatic logic is_mx_dp_op(operation_e op);
-    /* verilator lint_off UNUSED */
-    operation_e op_unused = op;
-    /* verilator lint_on UNUSED */
-    return 1'b0;
-  endfunction
 
   // Returns the number of operands by operation group
   function automatic int unsigned num_operands(opgroup_e grp);

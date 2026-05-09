@@ -68,14 +68,6 @@ module transdot_decomp_exponent_datapath_fp8 #(
   input  logic                               simd_enable_i,
   input  logic                               fp4_enable_i,
 
-  // OCP MX (microscaling) sideband. When mx_enable_i=1, the per-block scale
-  // pair (mx_scale_a_i, mx_scale_b_i) is added into exp_product_lane0 as
-  // (s_A + s_B - 254). Both scales are E8M0 (unsigned 8-bit, biased 127).
-  // Active only when dp_enable_i=1 (FP4-DP / FP8-DP / FP16-DP geometry).
-  input  logic                               mx_enable_i,
-  input  logic [7:0]                         mx_scale_a_i,
-  input  logic [7:0]                         mx_scale_b_i,
-
   // ---------------- Outputs ----------------
   output logic signed [EXP_WIDTH-1:0]        exponent_addend_o,
   output logic signed [EXP_WIDTH-1:0]        exponent_product_o,
@@ -272,19 +264,8 @@ module transdot_decomp_exponent_datapath_fp8 #(
                               (larger_exp_sel==2'b01 ? exponent_product_fp8_1 : exponent_product_fp8_2));
 
   // DP path uses a 1-bit normalized mantissa sum in the multiplier.
-  // OCP MX: when mx_enable_i=1, fold the shared block scale into the product
-  // exponent: result *= 2^(s_A + s_B - 254). Range of the scale shift is
-  // [-254, +256], easily within signed EXP_WIDTH=10. mx_enable=0 leaves
-  // exp_product_lane0 bit-exact to the pre-MX behavior.
-  logic signed [EXP_WIDTH-1:0] mx_scale_shift;
-  assign mx_scale_shift = mx_enable_i
-                          ? signed'({2'b00, mx_scale_a_i})
-                            + signed'({2'b00, mx_scale_b_i})
-                            - 10'sd254
-                          : 10'sd0;
-
-  assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? (10'sd132 + mx_scale_shift)
-                                                         : (exp_product_largest + 10'sd1 + mx_scale_shift))
+  assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? 10'sd132
+                                                         : (exp_product_largest + 10'sd1))
                                          : exponent_product;
 
   // Lane-0/1 diffs widened to RED_EXP_W_01 to hold BF16's 8-b exp range
