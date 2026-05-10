@@ -829,6 +829,8 @@ endtask
 task automatic run_dp_fp8(fp_format_e fmt, string prefix);
 int ntests;
 int pass_count = 0;
+int diag_nz_count = 0;
+int diag_max_ulp = 0;
 real hw, gold, diff;
 int ulp;
 
@@ -863,6 +865,12 @@ for (int i = 0; i < ntests; i++) begin
   ulp  = ulp_diff(result_o, golden_output[i]);
   diff = (gold == 0) ? $abs(hw) : $abs((hw - gold) / gold);
 
+  // DIAG: track non-bit-exact cases (does not affect pass/fail).
+  if (ulp != 0) begin
+    diag_nz_count++;
+    if ($abs(ulp) > diag_max_ulp) diag_max_ulp = $abs(ulp);
+  end
+
   if ((diff < REL_ERR_THRESH) || ($abs(ulp) < ULP_ERR_THRESH)) begin
     pass_count++;
     if (verbose)
@@ -895,6 +903,8 @@ for (int i = 0; i < ntests; i++) begin
 end
 
 $display("[TB] Format %s: %0d / %0d passed", prefix, pass_count, ntests);
+$display("[TB] DIAG %s: %0d / %0d cells with ULP!=0, max_ulp=%0d",
+         prefix, diag_nz_count, ntests, diag_max_ulp);
 
 pass_dp_fp8 = pass_count;
 total_dp_fp8 = ntests;

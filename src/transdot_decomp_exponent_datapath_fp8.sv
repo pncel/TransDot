@@ -228,10 +228,17 @@ module transdot_decomp_exponent_datapath_fp8 #(
   localparam int unsigned RED_EXP_W_23  = 6;
   logic [RED_EXP_W_01-1:0] reduced_exponent_product_lane0, reduced_exponent_product_lane1;
   logic [RED_EXP_W_23-1:0] reduced_exponent_product_lane2, reduced_exponent_product_lane3;
-  assign reduced_exponent_product_lane0 = (info_a_i.is_zero || info_b_i.is_zero)             ? '0 : exponent_a[SUPER_EXP_BITS-1:0]         + exponent_b[SUPER_EXP_BITS-1:0];
-  assign reduced_exponent_product_lane1 = (info_a_simd_i.is_zero || info_b_simd_i.is_zero)   ? '0 : exponent_a_simd[SUPER_EXP_BITS-1:0]    + exponent_b_simd[SUPER_EXP_BITS-1:0];
-  assign reduced_exponent_product_lane2 = (info_a_fp8_1_i.is_zero || info_b_fp8_1_i.is_zero) ? '0 : exponent_a_fp8_1[4:0]                  + exponent_b_fp8_1[4:0];
-  assign reduced_exponent_product_lane3 = (info_a_fp8_2_i.is_zero || info_b_fp8_2_i.is_zero) ? '0 : exponent_a_fp8_2[4:0]                  + exponent_b_fp8_2[4:0];
+  // Subnormal-aware effective exp: for subnormal-nonzero operands the
+  // encoded exp is 0 but the effective exp is emin (= 1 in biased form).
+  // The full-width `exponent_product_*` paths above already compensate
+  // via `+ info_*_i.is_subnormal`; the reduced paths used for DP-lane
+  // shamt and anchor selection also need it. Without this, FP8 (E4M3)
+  // 4-lane DP undercounts subnormal lane products by 2×, which compounds
+  // across the 16-PE cascade (~80% of cells drift, max ~2.4M ULP-FP32).
+  assign reduced_exponent_product_lane0 = (info_a_i.is_zero || info_b_i.is_zero)             ? '0 : exponent_a[SUPER_EXP_BITS-1:0]         + exponent_b[SUPER_EXP_BITS-1:0]         + info_a_i.is_subnormal      + info_b_i.is_subnormal;
+  assign reduced_exponent_product_lane1 = (info_a_simd_i.is_zero || info_b_simd_i.is_zero)   ? '0 : exponent_a_simd[SUPER_EXP_BITS-1:0]    + exponent_b_simd[SUPER_EXP_BITS-1:0]    + info_a_simd_i.is_subnormal + info_b_simd_i.is_subnormal;
+  assign reduced_exponent_product_lane2 = (info_a_fp8_1_i.is_zero || info_b_fp8_1_i.is_zero) ? '0 : exponent_a_fp8_1[4:0]                  + exponent_b_fp8_1[4:0]                  + info_a_fp8_1_i.is_subnormal + info_b_fp8_1_i.is_subnormal;
+  assign reduced_exponent_product_lane3 = (info_a_fp8_2_i.is_zero || info_b_fp8_2_i.is_zero) ? '0 : exponent_a_fp8_2[4:0]                  + exponent_b_fp8_2[4:0]                  + info_a_fp8_2_i.is_subnormal + info_b_fp8_2_i.is_subnormal;
 
   logic larger_exp_product_flag_0_1;
   assign larger_exp_product_flag_0_1 = (reduced_exponent_product_lane0 > reduced_exponent_product_lane1) ? 1'b1 : 1'b0;
@@ -264,8 +271,14 @@ module transdot_decomp_exponent_datapath_fp8 #(
                               (larger_exp_sel==2'b01 ? exponent_product_fp8_1 : exponent_product_fp8_2));
 
   // DP path uses a 1-bit normalized mantissa sum in the multiplier.
+  // DP path: lane-product sum can grow by up to log2(4)=2 bits when 3-4
+  // lanes have similar magnitudes and same sign. The +2 anchor matches
+  // worst-case 4-lane growth (vs +1 which only covered 2-lane). The
+  // matching `product_shifted_selected` change in the addend datapath
+  // (4'd0 -> 3'd0 LSB pad) keeps the represented value invariant under
+  // the higher anchor.
   assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? 10'sd132
-                                                         : (exp_product_largest + 10'sd1))
+                                                         : (exp_product_largest + 10'sd2))
                                          : exponent_product;
 
   // Lane-0/1 diffs widened to RED_EXP_W_01 to hold BF16's 8-b exp range

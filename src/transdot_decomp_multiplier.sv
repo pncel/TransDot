@@ -453,6 +453,7 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   // 1'b0 -> scalar mode: 24x24 product
   // 1'b1 -> SIMD/DP mode: packed {a_hi*b_hi, a_lo*b_lo} where hi/lo are 12-bit halves
   input  logic                        clk_i,
+  input  logic                        rst_ni,
   input  logic                        pipe_en,
   input  logic                         dp_enable_i,
   input  logic                         simd_enable_i,
@@ -662,8 +663,13 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   assign sign_out = sign_out_d;
   assign product_int_dp_o = product_int_dp_d;
 `else
-  always_ff @(posedge clk_i) begin
-    if (pipe_en) begin
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      product_non_dp_q <= '0;
+      product_dp_q     <= '0;
+      product_int_dp_q <= '0;
+      sign_out_q       <= 1'b0;
+    end else if (pipe_en) begin
       product_non_dp_q <= product_non_dp_d;
       product_dp_q <= product_dp_d;
       product_int_dp_q <= product_int_dp_d;
@@ -1201,6 +1207,7 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
   parameter int unsigned PRECISION_BITS_FP8  = 4
 )(
   input  logic                         clk_i,
+  input  logic                         rst_ni,
   input  logic                         pipe_en,
   input  logic                         dp_enable_i,
   input  logic                         simd_enable_i,
@@ -1279,6 +1286,7 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
     .PRECISION_BITS      ( PRECISION_BITS )
   ) i_w6_direct_core (
     .clk_i            ( clk_i ),
+    .rst_ni           ( rst_ni ),
     .pipe_en          ( pipe_en ),
     .dp_enable_i      ( dp_enable_i ),
     .simd_enable_i    ( simd_enable_i ),

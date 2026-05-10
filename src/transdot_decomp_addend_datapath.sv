@@ -16,6 +16,7 @@ module transdot_decomp_addend_datapath_piped #(
 )(
   // ---------------- Inputs ----------------
   input  logic                               clk_i,
+  input  logic                               rst_ni,
   input  logic                               pipe_en,
 
   // ---------------- Main lane Inputs ----------------
@@ -180,9 +181,11 @@ module transdot_decomp_addend_datapath_piped #(
 `ifdef COMBINATIONAL
   assign addend_shift_full = addend_shift_full_d;
 `else
- always_ff @(posedge clk_i) begin
-   if (pipe_en) begin
-     addend_shift_full <= addend_shift_full_d; 
+ always_ff @(posedge clk_i or negedge rst_ni) begin
+   if (!rst_ni) begin
+     addend_shift_full <= '0;
+   end else if (pipe_en) begin
+     addend_shift_full <= addend_shift_full_d;
    end
  end
 `endif
@@ -711,8 +714,15 @@ module transdot_decomp_addend_datapath_piped_combined_product_dp #(
   parameter int unsigned SHIFT_AMOUNT_WIDTH_FP8 = $clog2(3 * PRECISION_BITS_FP8 + 5)
 )(
   input  logic                               clk_i,
+  input  logic                               rst_ni,
   input  logic                               pipe_en,
   input  logic                               dp_enable_i,
+  // fp4_enable_i selects the FP4 8-lane DP path. FP4 uses a fixed
+  // anchor (10'sd132) in transdot_decomp_exponent_datapath_fp8 that
+  // already accounts for log2(8)=3 bits of lane-sum growth, so its
+  // product padding stays at the original 4'd0. Only the FP8/FP16
+  // 2/4-lane DP path needs the +2 anchor + 3'd0 compensation.
+  input  logic                               fp4_enable_i,
 
   input  logic [PRECISION_BITS-1:0]          mantissa_c_i,
   input  logic [2*PRECISION_BITS-1:0]        product_comb_i,
@@ -760,7 +770,11 @@ module transdot_decomp_addend_datapath_piped_combined_product_dp #(
 
   always_comb begin
     if (dp_enable_i) begin
-      product_shifted_selected = {'0, product_dp_i, 4'd0};
+      // FP4 path uses fixed anchor +132 sized for 8-lane growth → keep
+      // 4'd0. FP8/FP16 2/4-lane DP path uses anchor +2 in the exp
+      // datapath → use 3'd0 to keep the represented value invariant.
+      product_shifted_selected = fp4_enable_i ? {'0, product_dp_i, 4'd0}
+                                              : {'0, product_dp_i, 3'd0};
     end else if (!simd_enable_i) begin
       product_shifted_selected = {'0, product_comb_i, 2'b00};
     end else if (is_fp8) begin
@@ -803,6 +817,7 @@ module transdot_decomp_addend_datapath_piped_combined_product_dp #(
     .SHIFT_AMOUNT_WIDTH_FP8 ( SHIFT_AMOUNT_WIDTH_FP8 )
   ) i_decomp_addend_datapath_combined_dp (
     .clk_i                   ( clk_i ),
+    .rst_ni                  ( rst_ni ),
     .pipe_en                 ( pipe_en ),
     .mantissa_c_i            ( mantissa_c_i ),
     .product_shifted_i       ( product_shifted_selected ),

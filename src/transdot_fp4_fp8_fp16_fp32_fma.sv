@@ -677,6 +677,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
       for (genvar op = 0; op < 3; op++) begin : gen_operands
         assign trimmed_ops[op]       = operands_q_fp8_2[op][FP_WIDTH-1:0];
         assign fmt_sign_fp8_2[fmt][op]     = operands_q_fp8_2[op][FP_WIDTH-1];
+        // TEMPORARILY REVERTED: skip subnormal correction here to test.
         assign fmt_exponent_fp8_2[fmt][op] = signed'({1'b0, operands_q_fp8_2[op][MAN_BITS+:EXP_BITS]});
         if (fmt == fpnew_pkg::FP8ALT) begin : g_man_fp8alt_pad
           // E5M2 → pad to FP8 (E4M3) layout in this fp8_2 lane.
@@ -1290,6 +1291,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .PRECISION_BITS_FP8  ( PRECISION_BITS_FP8 )
   ) i_transdot_multiply_dp_combined (
     .clk_i                 ( clk_i ),
+    .rst_ni                ( rst_ni ),
     .pipe_en               ( pipe_qq_en ),
     .dp_enable_i           ( inp_pipe_dp_enable_q ),
     .simd_enable_i         ( inp_pipe_simd_enable_q ),
@@ -1322,8 +1324,14 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   );
 
   // Registered (qq-stage) snapshots for the harness — aligned with product_int_dp.
-  always_ff @(posedge clk_i) begin
-    if (pipe_qq_en) begin
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      int_op_qq        <= 1'b0;
+      int_fmt_qq       <= fpnew_pkg::int_format_e'(0);
+      int_prod_sign_qq <= '0;
+      src_is_fp8_qq    <= 1'b0;
+      operand_c_int_qq <= '0;
+    end else if (pipe_qq_en) begin
       int_op_qq        <= int_op_inp;
       int_fmt_qq       <= inp_pipe_int_fmt_q;
       int_prod_sign_qq <= int_prod_sign;
@@ -1394,10 +1402,16 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic tentative_sign_qq;
   logic effective_subtraction_qq;
   logic operand_c_sign_qq;
-  always_ff @(posedge clk_i) begin
-      tentative_sign_qq <= tentative_sign;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      tentative_sign_qq        <= 1'b0;
+      effective_subtraction_qq <= 1'b0;
+      operand_c_sign_qq        <= 1'b0;
+    end else begin
+      tentative_sign_qq        <= tentative_sign;
       effective_subtraction_qq <= effective_subtraction;
-      operand_c_sign_qq <= operand_c.sign;
+      operand_c_sign_qq        <= operand_c.sign;
+    end
   end
   assign tentative_sign_new = inp_pipe_dp_enable_q ? tentative_sign_dp : tentative_sign_qq; 
   assign effective_subtraction_new = inp_pipe_dp_enable_q ? tentative_sign_dp ^ operand_c_sign_qq : effective_subtraction_qq;
@@ -1439,8 +1453,10 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .SHIFT_AMOUNT_WIDTH_FP8(SHIFT_AMOUNT_WIDTH_FP8)
   ) i_decomp_addend_datapath (
     .clk_i                   ( clk_i ),
+    .rst_ni                  ( rst_ni ),
     .pipe_en                 ( pipe_qq_en ),
     .dp_enable_i             ( inp_pipe_dp_enable_q ),
+    .fp4_enable_i            ( inp_pipe_fp4_enable_q ),
     .mantissa_c_i            (mantissa_c),
     .product_comb_i          (product_comb),
     .product_dp_i            (product_dp_comb),
@@ -1548,14 +1564,23 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
       exponent_product_simd_qq       <= '0;
       exponent_difference_simd_qq    <= '0;
       tentative_exponent_simd_qq     <= '0;
+      result_is_special_simd_qq      <= 1'b0;
+      special_result_simd_qq         <= '0;
+      special_status_simd_qq         <= '0;
 
       exponent_product_fp8_1_qq       <= '0;
       exponent_difference_fp8_1_qq    <= '0;
       tentative_exponent_fp8_1_qq     <= '0;
+      result_is_special_fp8_1_qq      <= 1'b0;
+      special_result_fp8_1_qq         <= '0;
+      special_status_fp8_1_qq         <= '0;
 
       exponent_product_fp8_2_qq       <= '0;
       exponent_difference_fp8_2_qq    <= '0;
       tentative_exponent_fp8_2_qq     <= '0;
+      result_is_special_fp8_2_qq      <= 1'b0;
+      special_result_fp8_2_qq         <= '0;
+      special_status_fp8_2_qq         <= '0;
       addend_normalize_shamt_qq <= '0;
       addend_normalize_shamt_simd_qq <= '0;
       addend_normalize_shamt_fp8_1_qq <= '0;
