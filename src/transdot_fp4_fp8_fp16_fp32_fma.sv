@@ -1234,35 +1234,41 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic [3:0] y_sign;
   logic tentative_sign_lane0, tentative_sign_lane1, tentative_sign_lane2, tentative_sign_lane3;
 
+  // Drive FP4 lanes from the post-input-pipeline operands_q (NOT operands_i)
+  // so the FP4 path takes the same NumPipeRegs of input-side latency as every
+  // other format. Tapping operands_i bypassed the input pipeline and made the
+  // FP4 data path 1 cycle shorter, which (since the OBSR scale_pipe and the
+  // row skew are sized for the canonical depth) misaligned the OBSR scale
+  // cascade by 1 cycle in MX builds.
   transdot_fp4_dp_qtr10 fp4_2_term_dp_lane0 (
-    .a0(operands_i[0][3:0]),
-    .b0(operands_i[1][3:0]),
-    .a1(operands_i[0][7:4]),
-    .b1(operands_i[1][7:4]),
+    .a0(operands_q[0][3:0]),
+    .b0(operands_q[1][3:0]),
+    .a1(operands_q[0][7:4]),
+    .b1(operands_q[1][7:4]),
     .y_sign(y_sign[0]),
     .y_mag(y_mag[0])  // exact: value = y_mag * 0.25
   );
   transdot_fp4_dp_qtr10 fp4_2_term_dp_lane1 (
-    .a0(operands_i[0][11:8]),
-    .b0(operands_i[1][11:8]),
-    .a1(operands_i[0][15:12]),
-    .b1(operands_i[1][15:12]),
+    .a0(operands_q[0][11:8]),
+    .b0(operands_q[1][11:8]),
+    .a1(operands_q[0][15:12]),
+    .b1(operands_q[1][15:12]),
     .y_sign(y_sign[1]),
     .y_mag(y_mag[1])  // exact: value = y_mag * 0.25
   );
   transdot_fp4_dp_qtr10 fp4_2_term_dp_lane2 (
-    .a0(operands_i[0][19:16]),
-    .b0(operands_i[1][19:16]),
-    .a1(operands_i[0][23:20]),
-    .b1(operands_i[1][23:20]),
+    .a0(operands_q[0][19:16]),
+    .b0(operands_q[1][19:16]),
+    .a1(operands_q[0][23:20]),
+    .b1(operands_q[1][23:20]),
     .y_sign(y_sign[2]),
     .y_mag(y_mag[2])  // exact: value = y_mag * 0.25
   );
   transdot_fp4_dp_qtr10 fp4_2_term_dp_lane3 (
-    .a0(operands_i[0][27:24]),
-    .b0(operands_i[1][27:24]),
-    .a1(operands_i[0][31:28]),
-    .b1(operands_i[1][31:28]),
+    .a0(operands_q[0][27:24]),
+    .b0(operands_q[1][27:24]),
+    .a1(operands_q[0][31:28]),
+    .b1(operands_q[1][31:28]),
     .y_sign(y_sign[3]),
     .y_mag(y_mag[3])  // exact: value = y_mag * 0.25
   );
