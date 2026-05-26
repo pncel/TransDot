@@ -237,8 +237,11 @@ module transdot_decomp_exponent_datapath_fp8 #(
   // across the 16-PE cascade (~80% of cells drift, max ~2.4M ULP-FP32).
   assign reduced_exponent_product_lane0 = (info_a_i.is_zero || info_b_i.is_zero)             ? '0 : exponent_a[SUPER_EXP_BITS-1:0]         + exponent_b[SUPER_EXP_BITS-1:0]         + info_a_i.is_subnormal      + info_b_i.is_subnormal;
   assign reduced_exponent_product_lane1 = (info_a_simd_i.is_zero || info_b_simd_i.is_zero)   ? '0 : exponent_a_simd[SUPER_EXP_BITS-1:0]    + exponent_b_simd[SUPER_EXP_BITS-1:0]    + info_a_simd_i.is_subnormal + info_b_simd_i.is_subnormal;
-  assign reduced_exponent_product_lane2 = (info_a_fp8_1_i.is_zero || info_b_fp8_1_i.is_zero) ? '0 : exponent_a_fp8_1[4:0]                  + exponent_b_fp8_1[4:0]                  + info_a_fp8_1_i.is_subnormal + info_b_fp8_1_i.is_subnormal;
-  assign reduced_exponent_product_lane3 = (info_a_fp8_2_i.is_zero || info_b_fp8_2_i.is_zero) ? '0 : exponent_a_fp8_2[4:0]                  + exponent_b_fp8_2[4:0]                  + info_a_fp8_2_i.is_subnormal + info_b_fp8_2_i.is_subnormal;
+  // Slice width is parameter-driven (SUPER_EXP_BITS_FP8+1) so it stays in
+  // range when FP8 isn't enabled (then SUPER_EXP_BITS_FP8 collapses to the
+  // widest *enabled* small-format exp width; e.g. =2 for FP4-only).
+  assign reduced_exponent_product_lane2 = (info_a_fp8_1_i.is_zero || info_b_fp8_1_i.is_zero) ? '0 : exponent_a_fp8_1[SUPER_EXP_BITS_FP8:0] + exponent_b_fp8_1[SUPER_EXP_BITS_FP8:0] + info_a_fp8_1_i.is_subnormal + info_b_fp8_1_i.is_subnormal;
+  assign reduced_exponent_product_lane3 = (info_a_fp8_2_i.is_zero || info_b_fp8_2_i.is_zero) ? '0 : exponent_a_fp8_2[SUPER_EXP_BITS_FP8:0] + exponent_b_fp8_2[SUPER_EXP_BITS_FP8:0] + info_a_fp8_2_i.is_subnormal + info_b_fp8_2_i.is_subnormal;
 
   logic larger_exp_product_flag_0_1;
   assign larger_exp_product_flag_0_1 = (reduced_exponent_product_lane0 > reduced_exponent_product_lane1) ? 1'b1 : 1'b0;

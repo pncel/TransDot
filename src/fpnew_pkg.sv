@@ -347,17 +347,19 @@ package fpnew_pkg;
     IntFmtMask:    4'b0000
   };
 
-  // INT-enabled variant for the MFSA paper INT8/INT16 DPA path. Same FP mask
-  // as `transdot_features` (FP32+FP16+FP8+FP4); IntFmtMask enables INT8/INT16/
-  // INT32 (4'b1110 = bits 0/1/2 → INT8/INT16/INT32 per int_format_e). INT64
-  // is left disabled because the array's 32-b cascade cannot carry it. INT4
-  // reuses the FP4 DP2 slot at runtime via `int4_mode_i` and is not a real
-  // int_format_e entry; it does not appear in IntFmtMask.
+  // Full MFSA hero config for ICCD2026: 6 FP formats (FP32, FP16, BF16, FP8
+  // E4M3, FP8ALT E5M2, FP4) + INT8/INT16/INT32 + INT4 (FP4-DP runtime slot)
+  // + MX (MXFP8, MXFP4 via OBSR). FpFmtMask=7'b1011111 covers all six FP
+  // (bit6=FP32, bit5=FP64 disabled, bit4=BF16, bit3=FP8, bit2=FP16, bit1=FP4,
+  // bit0=FP8ALT). IntFmtMask=4'b1110 enables INT8/INT16/INT32 (INT64
+  // disabled because the array's 32-b cascade cannot carry it). INT4 reuses
+  // the FP4-DP slot at runtime via `int_mode_i` + IntFmt=INT4, so it does
+  // not appear in IntFmtMask.
   localparam fpu_features_t transdot_features_with_int = '{
     Width:         32,
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
-    FpFmtMask:     7'b1011010,
+    FpFmtMask:     7'b1011111,
     IntFmtMask:    4'b1110
   };
 
@@ -433,6 +435,20 @@ package fpnew_pkg;
     IntFmtMask:    4'b0000
   };
 
+  // FP8 + FP4 dot-product PE. The FMA's SIMD lane (operands_q_simd of
+  // WIDTH/2) requires WIDTH >= 16 to decode FP8/FP16 SIMD slices, so the
+  // smallest viable mask still includes one 16-bit anchor format. FP16 is
+  // far smaller than FP32, giving us a meaningfully smaller PE than the
+  // FP32-anchored variant. INT helpers are auto-disabled by the
+  // INT_HELPER_SUPPORTED gate (no FP32 in mask).
+  localparam fpu_features_t transdot_features_fp8_fp4 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b0011010,            // FP16 + FP8 + FP4
+    IntFmtMask:    4'b0000
+  };
+
   localparam fpu_features_t transdot_features_bf16_fp8_fp4 = '{
     Width:         32,
     EnableVectors: 1'b0,
@@ -482,6 +498,59 @@ package fpnew_pkg;
     EnableVectors: 1'b0,
     EnableNanBox:  1'b1,
     FpFmtMask:     7'b1011111,            // FP32 + FP16 + FP8 + FP16ALT + FP4 + FP8ALT
+    IntFmtMask:    4'b0000
+  };
+
+  // ICCD 2026 incremental-cost sweep on top of BF16. The bf16_fp8 preset
+  // above already includes FP16, which conflates two additions; these
+  // strictly add formats one at a time so the PPA delta isolates each.
+  //   bf16            = transdot_features_bf16_only       (FP32 + BF16)
+  //   +fp8 (e4m3/e5m2) = transdot_features_bf16_fp8_fp8alt (this preset)
+  //   +fp4             = transdot_features_bf16_fp8_fp8alt_fp4
+  //   +fp16            = transdot_features_bf16_fp8_fp4_fp8alt (above)
+  // Mask bit order (left to right): FP32, FP64, FP16, FP8, FP16ALT, FP4, FP8ALT.
+  localparam fpu_features_t transdot_features_bf16_fp8_fp8alt = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1001101,            // FP32 + FP8 + FP16ALT + FP8ALT
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp8_fp8alt_fp4 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b1001111,            // FP32 + FP8 + FP16ALT + FP4 + FP8ALT
+    IntFmtMask:    4'b0000
+  };
+
+  // No-FP32 variants of the BF16-incremental sweep. These drop FP32 from
+  // the FpFmtMask entirely -- the elaboration bug fixed at
+  // transdot_fp4_fp8_fp16_fp32_fma_opt.sv:282 is what previously forced
+  // FP32 to stay in. If elaboration still works, these isolate the
+  // FP32-multiplier cost from the rest of the multi-format datapath.
+  localparam fpu_features_t transdot_features_bf16_fp8_fp8alt_nofp32 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b0001101,            // BF16 + FP8 + FP8ALT (no FP32)
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_bf16_fp8_fp8alt_fp4_nofp32 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b0001111,            // BF16 + FP8 + FP4 + FP8ALT (no FP32)
+    IntFmtMask:    4'b0000
+  };
+
+  localparam fpu_features_t transdot_features_bf16_full_nofp32 = '{
+    Width:         32,
+    EnableVectors: 1'b0,
+    EnableNanBox:  1'b1,
+    FpFmtMask:     7'b0011111,            // FP16 + BF16 + FP8 + FP4 + FP8ALT (no FP32)
     IntFmtMask:    4'b0000
   };
 

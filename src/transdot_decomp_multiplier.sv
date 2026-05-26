@@ -1249,37 +1249,50 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
   logic [PRECISION_BITS-1:0]   mantissa_a_selected;
   logic [PRECISION_BITS-1:0]   mantissa_b_selected;
 
-  always_comb begin
-    if (!(dp_enable_i || simd_enable_i)) begin
-      mantissa_a_selected = mantissa_a_i;
-      mantissa_b_selected = mantissa_b_i;
-    end else if (src_is_fp8_i) begin
-      mantissa_a_selected = {
-        2'b00, mantissa_a_fp8_2_i,
-        2'b00, mantissa_a_fp8_1_i,
-        2'b00, mantissa_a_simd_i[10:7],
-        2'b00, mantissa_a_i[23:20]
-      };
-      mantissa_b_selected = {
-        2'b00, mantissa_b_fp8_2_i,
-        2'b00, mantissa_b_fp8_1_i,
-        2'b00, mantissa_b_simd_i[10:7],
-        2'b00, mantissa_b_i[23:20]
-      };
-    end else begin
-      mantissa_a_selected = {
-        1'b0, mantissa_a_simd_i[10:6],
-        mantissa_a_simd_i[5:0],
-        1'b0, mantissa_a_i[23:19],
-        mantissa_a_i[18:13]
-      };
-      mantissa_b_selected = {
-        1'b0, mantissa_b_simd_i[10:6],
-        mantissa_b_simd_i[5:0],
-        1'b0, mantissa_b_i[23:19],
-        mantissa_b_i[18:13]
-      };
+  // FP8-DP and FP16-DP packings below assume PRECISION_BITS=24 (FP32 anchor)
+  // because they slice mantissa_a_i[23:N]. When the PE is built without
+  // FP32, PRECISION_BITS shrinks below 24 and those branches can't run
+  // physically; the runtime conditions (src_is_fp8_i, dp_enable_i, etc.)
+  // never go true either. Use a generate-if so the FP32-anchor branches
+  // are structurally absent for narrower PRECISION_BITS.
+  if (PRECISION_BITS >= 24) begin : g_fp32_anchor_pack
+    always_comb begin
+      if (!(dp_enable_i || simd_enable_i)) begin
+        mantissa_a_selected = mantissa_a_i;
+        mantissa_b_selected = mantissa_b_i;
+      end else if (src_is_fp8_i) begin
+        mantissa_a_selected = {
+          2'b00, mantissa_a_fp8_2_i,
+          2'b00, mantissa_a_fp8_1_i,
+          2'b00, mantissa_a_simd_i[10:7],
+          2'b00, mantissa_a_i[23:20]
+        };
+        mantissa_b_selected = {
+          2'b00, mantissa_b_fp8_2_i,
+          2'b00, mantissa_b_fp8_1_i,
+          2'b00, mantissa_b_simd_i[10:7],
+          2'b00, mantissa_b_i[23:20]
+        };
+      end else begin
+        mantissa_a_selected = {
+          1'b0, mantissa_a_simd_i[10:6],
+          mantissa_a_simd_i[5:0],
+          1'b0, mantissa_a_i[23:19],
+          mantissa_a_i[18:13]
+        };
+        mantissa_b_selected = {
+          1'b0, mantissa_b_simd_i[10:6],
+          mantissa_b_simd_i[5:0],
+          1'b0, mantissa_b_i[23:19],
+          mantissa_b_i[18:13]
+        };
+      end
     end
+  end else begin : g_narrow_passthrough
+    // Narrower PE: no FP8-DP / FP16-DP packing — just pass the mantissa
+    // through. DP / SIMD are disabled at runtime in this config.
+    assign mantissa_a_selected = mantissa_a_i;
+    assign mantissa_b_selected = mantissa_b_i;
   end
 
   transdot_decomp_multiplier_w6_4lane_dp_piped #(

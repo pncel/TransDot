@@ -78,20 +78,44 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   // Sized for FP16 / BF16 — exp_bits is 8 (BF16) so that a single SIMD
   // lane holds either an FP16 (5b exp) or BF16 (8b exp) exponent without
   // truncation. Mantissa stays at 10b since BF16's 7b mantissa fits.
-  localparam int unsigned SUPER_EXP_BITS_SIMD = 8;
-  localparam int unsigned SUPER_MAN_BITS_SIMD = 10;
+  //
+  // CLAMP TO SUPER_EXP_BITS / SUPER_MAN_BITS: when the FpFmtConfig drops
+  // all 16-bit formats (e.g. FP8+FP4 only or FP16+FP8+FP4), SUPER_EXP_BITS
+  // / SUPER_MAN_BITS shrink below the historical hardcoded values and the
+  // downstream `{(1+SUPER_EXP_BITS-SUPER_EXP_BITS_SIMD){1'b0}}` zero-pad
+  // expressions in transdot_decomp_*_datapath_fp8.sv would otherwise go
+  // negative. Backward-compatible for FP32-anchored masks where the
+  // hardcoded values already match.
+  localparam int unsigned SUPER_EXP_BITS_SIMD =
+      (8 > SUPER_EXP_BITS) ? SUPER_EXP_BITS : 8;
+  localparam int unsigned SUPER_MAN_BITS_SIMD =
+      (10 > SUPER_MAN_BITS) ? SUPER_MAN_BITS : 10;
 
   // FP8 lane (fp8_1 / fp8_2 — lanes 2/3 of the FP8-DP geometry) operand-decode
   // widths. Sized for the larger of E4M3 (4-b exp) and E5M2 (5-b exp); mantissa
   // stays at 3 b since E4M3's 3-b mantissa is the larger of the two and E5M2's
-  // 2-b mantissa fits with one zero pad bit.
-  localparam int unsigned SUPER_EXP_BITS_FP8 = 5;
-  localparam int unsigned SUPER_MAN_BITS_FP8 = 3;
+  // 2-b mantissa fits with one zero pad bit. Same clamp as the SIMD lane above.
+  localparam int unsigned SUPER_EXP_BITS_FP8 =
+      (5 > SUPER_EXP_BITS) ? SUPER_EXP_BITS : 5;
+  localparam int unsigned SUPER_MAN_BITS_FP8 =
+      (3 > SUPER_MAN_BITS) ? SUPER_MAN_BITS : 3;
 
   // Precision bits 'p' include the implicit bit
   localparam int unsigned PRECISION_BITS = SUPER_MAN_BITS + 1; //24
   localparam int unsigned PRECISION_BITS_SIMD = SUPER_MAN_BITS_SIMD + 1; //11
   localparam int unsigned PRECISION_BITS_FP8 = SUPER_MAN_BITS_FP8 + 1; //4
+
+  // INT helper requires PRECISION_BITS >= 24 + WIDTH >= 16 so the INT16/INT8/
+  // INT4 mantissa lanes fit in mantissa_*_int's bit slots; both conditions
+  // are equivalent to FP32 being enabled in the FpFmtConfig mask. When FP32
+  // is disabled the entire INT-helper block is structurally removed via
+  // generate-if (see INT16/INT8/INT4 mag + mantissa_*_int blocks below), so
+  // Genus does not have to elaborate the [15] / [23:20] hardcoded slices.
+  // This enables truly flexible mask choices (e.g. FP16+FP8+FP4 or
+  // FP8+FP4 only) by gating ONLY the INT lanes, leaving the FP datapath
+  // intact.
+  localparam bit INT_HELPER_SUPPORTED =
+      FpFmtConfig[fpnew_pkg::FP32] && (PRECISION_BITS >= 24) && (WIDTH >= 16);
   // The lower 2p+3 bits of the internal FMA result will be needed for leading-zero detection
   localparam int unsigned LOWER_SUM_WIDTH  = 2 * PRECISION_BITS + 3; //51
   localparam int unsigned LZC_RESULT_WIDTH = $clog2(LOWER_SUM_WIDTH); //6
@@ -316,35 +340,40 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   // Per-lane sign bits sourced from operand MSBs (for signed); 0 for unsigned.
   // For INT16, only lane 0 is meaningful; for INT8 lanes 0..1; for INT4 lanes 0..3.
   logic [3:0] int_a_sign, int_b_sign;
-  always_comb begin
-    int_a_sign = '0;
-    int_b_sign = '0;
-    unique case (inp_pipe_int_fmt_q)
-      fpnew_pkg::INT16: begin
-        int_a_sign[0] = int_signed & operands_q[0][15];
-        int_b_sign[0] = int_signed & operands_q[1][15];
-      end
-      fpnew_pkg::INT8: begin
-        int_a_sign[0] = int_signed & operands_q[0][7];
-        int_b_sign[0] = int_signed & operands_q[1][7];
-        int_a_sign[1] = int_signed & operands_q[0][15];
-        int_b_sign[1] = int_signed & operands_q[1][15];
-      end
-      fpnew_pkg::INT4: begin
-        int_a_sign[0] = int_signed & operands_q[0][3];
-        int_b_sign[0] = int_signed & operands_q[1][3];
-        int_a_sign[1] = int_signed & operands_q[0][7];
-        int_b_sign[1] = int_signed & operands_q[1][7];
-        int_a_sign[2] = int_signed & operands_q[0][11];
-        int_b_sign[2] = int_signed & operands_q[1][11];
-        int_a_sign[3] = int_signed & operands_q[0][15];
-        int_b_sign[3] = int_signed & operands_q[1][15];
-      end
-      default: begin
-        int_a_sign = '0;
-        int_b_sign = '0;
-      end
-    endcase
+  if (INT_HELPER_SUPPORTED) begin : g_int_sign_supp
+    always_comb begin
+      int_a_sign = '0;
+      int_b_sign = '0;
+      unique case (inp_pipe_int_fmt_q)
+        fpnew_pkg::INT16: begin
+          int_a_sign[0] = int_signed & operands_q[0][15];
+          int_b_sign[0] = int_signed & operands_q[1][15];
+        end
+        fpnew_pkg::INT8: begin
+          int_a_sign[0] = int_signed & operands_q[0][7];
+          int_b_sign[0] = int_signed & operands_q[1][7];
+          int_a_sign[1] = int_signed & operands_q[0][15];
+          int_b_sign[1] = int_signed & operands_q[1][15];
+        end
+        fpnew_pkg::INT4: begin
+          int_a_sign[0] = int_signed & operands_q[0][3];
+          int_b_sign[0] = int_signed & operands_q[1][3];
+          int_a_sign[1] = int_signed & operands_q[0][7];
+          int_b_sign[1] = int_signed & operands_q[1][7];
+          int_a_sign[2] = int_signed & operands_q[0][11];
+          int_b_sign[2] = int_signed & operands_q[1][11];
+          int_a_sign[3] = int_signed & operands_q[0][15];
+          int_b_sign[3] = int_signed & operands_q[1][15];
+        end
+        default: begin
+          int_a_sign = '0;
+          int_b_sign = '0;
+        end
+      endcase
+    end
+  end else begin : g_int_sign_stub
+    assign int_a_sign = '0;
+    assign int_b_sign = '0;
   end
 
   // Per-lane magnitudes: ~op + 1 if signed-and-negative, else op. The MIN_VAL
@@ -356,24 +385,38 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic [3:0]  int4_a_mag  [0:3];
   logic [3:0]  int4_b_mag  [0:3];
 
-  assign int16_a_mag = int_a_sign[0] ? (~operands_q[0][15:0] + 16'd1) : operands_q[0][15:0];
-  assign int16_b_mag = int_b_sign[0] ? (~operands_q[1][15:0] + 16'd1) : operands_q[1][15:0];
+  if (INT_HELPER_SUPPORTED) begin : g_int_mag_supp
+    assign int16_a_mag = int_a_sign[0] ? (~operands_q[0][15:0] + 16'd1) : operands_q[0][15:0];
+    assign int16_b_mag = int_b_sign[0] ? (~operands_q[1][15:0] + 16'd1) : operands_q[1][15:0];
 
-  for (genvar L = 0; L < 2; L++) begin : g_int8_mag
-    assign int8_a_mag[L] = int_a_sign[L] ? (~operands_q[0][L*8 +: 8] + 8'd1)
-                                          :  operands_q[0][L*8 +: 8];
-    assign int8_b_mag[L] = int_b_sign[L] ? (~operands_q[1][L*8 +: 8] + 8'd1)
-                                          :  operands_q[1][L*8 +: 8];
-  end
+    for (genvar L = 0; L < 2; L++) begin : g_int8_mag
+      assign int8_a_mag[L] = int_a_sign[L] ? (~operands_q[0][L*8 +: 8] + 8'd1)
+                                            :  operands_q[0][L*8 +: 8];
+      assign int8_b_mag[L] = int_b_sign[L] ? (~operands_q[1][L*8 +: 8] + 8'd1)
+                                            :  operands_q[1][L*8 +: 8];
+    end
 
-  for (genvar L = 0; L < 4; L++) begin : g_int4_mag
-    assign int4_a_mag[L] = int_a_sign[L] ? (~operands_q[0][L*4 +: 4] + 4'd1)
-                                          :  operands_q[0][L*4 +: 4];
-    assign int4_b_mag[L] = int_b_sign[L] ? (~operands_q[1][L*4 +: 4] + 4'd1)
+    for (genvar L = 0; L < 4; L++) begin : g_int4_mag
+      assign int4_a_mag[L] = int_a_sign[L] ? (~operands_q[0][L*4 +: 4] + 4'd1)
+                                            :  operands_q[0][L*4 +: 4];
+      assign int4_b_mag[L] = int_b_sign[L] ? (~operands_q[1][L*4 +: 4] + 4'd1)
                                           :  operands_q[1][L*4 +: 4];
+    end
+  end else begin : g_int_mag_stub
+    assign int16_a_mag = '0;
+    assign int16_b_mag = '0;
+    for (genvar L = 0; L < 2; L++) begin : g_int8_mag_stub
+      assign int8_a_mag[L] = '0;
+      assign int8_b_mag[L] = '0;
+    end
+    for (genvar L = 0; L < 4; L++) begin : g_int4_mag_stub
+      assign int4_a_mag[L] = '0;
+      assign int4_b_mag[L] = '0;
+    end
   end
 
-  // Per-lane product sign (XOR of operand signs)
+  // Per-lane product sign (XOR of operand signs) — uses int_a_sign / int_b_sign
+  // which are stubbed to 0 when INT_HELPER_SUPPORTED=0, so this is safe.
   logic [3:0] int_prod_sign;
   for (genvar L = 0; L < 4; L++) begin : g_int_prod_sign
     assign int_prod_sign[L] = int_a_sign[L] ^ int_b_sign[L];
@@ -403,44 +446,55 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic [PRECISION_BITS_FP8-1:0]  mantissa_a_fp8_1_int, mantissa_b_fp8_1_int; // 4-bit
   logic [PRECISION_BITS_FP8-1:0]  mantissa_a_fp8_2_int, mantissa_b_fp8_2_int; // 4-bit
 
-  always_comb begin
-    mantissa_a_int       = '0;
-    mantissa_b_int       = '0;
-    mantissa_a_simd_int  = '0;
-    mantissa_b_simd_int  = '0;
-    mantissa_a_fp8_1_int = '0;
-    mantissa_b_fp8_1_int = '0;
-    mantissa_a_fp8_2_int = '0;
-    mantissa_b_fp8_2_int = '0;
-    unique case (inp_pipe_int_fmt_q)
-      fpnew_pkg::INT16: begin
-        mantissa_a_int[15:0] = int16_a_mag;
-        mantissa_b_int[15:0] = int16_b_mag;
-      end
-      fpnew_pkg::INT8: begin
-        // lane 0 → mantissa_a_i[23:13] (11-bit slot, 8-bit mag in low 8)
-        mantissa_a_int[20:13] = int8_a_mag[0];
-        mantissa_b_int[20:13] = int8_b_mag[0];
-        // lane 1 → mantissa_a_simd_i[10:0] (11-bit slot)
-        mantissa_a_simd_int[7:0] = int8_a_mag[1];
-        mantissa_b_simd_int[7:0] = int8_b_mag[1];
-      end
-      fpnew_pkg::INT4: begin
-        // lane 0 → mantissa_a_i[23:20] (4-bit slot)
-        mantissa_a_int[23:20] = int4_a_mag[0];
-        mantissa_b_int[23:20] = int4_b_mag[0];
-        // lane 1 → mantissa_a_simd_i[10:7] (4-bit slot)
-        mantissa_a_simd_int[10:7] = int4_a_mag[1];
-        mantissa_b_simd_int[10:7] = int4_b_mag[1];
-        // lane 2 → mantissa_a_fp8_1_i[3:0] (4-bit slot)
-        mantissa_a_fp8_1_int = int4_a_mag[2];
-        mantissa_b_fp8_1_int = int4_b_mag[2];
-        // lane 3 → mantissa_a_fp8_2_i[3:0] (4-bit slot)
-        mantissa_a_fp8_2_int = int4_a_mag[3];
-        mantissa_b_fp8_2_int = int4_b_mag[3];
-      end
-      default: ;  // leave all '0
-    endcase
+  if (INT_HELPER_SUPPORTED) begin : g_int_mantissa_supp
+    always_comb begin
+      mantissa_a_int       = '0;
+      mantissa_b_int       = '0;
+      mantissa_a_simd_int  = '0;
+      mantissa_b_simd_int  = '0;
+      mantissa_a_fp8_1_int = '0;
+      mantissa_b_fp8_1_int = '0;
+      mantissa_a_fp8_2_int = '0;
+      mantissa_b_fp8_2_int = '0;
+      unique case (inp_pipe_int_fmt_q)
+        fpnew_pkg::INT16: begin
+          mantissa_a_int[15:0] = int16_a_mag;
+          mantissa_b_int[15:0] = int16_b_mag;
+        end
+        fpnew_pkg::INT8: begin
+          // lane 0 → mantissa_a_i[23:13] (11-bit slot, 8-bit mag in low 8)
+          mantissa_a_int[20:13] = int8_a_mag[0];
+          mantissa_b_int[20:13] = int8_b_mag[0];
+          // lane 1 → mantissa_a_simd_i[10:0] (11-bit slot)
+          mantissa_a_simd_int[7:0] = int8_a_mag[1];
+          mantissa_b_simd_int[7:0] = int8_b_mag[1];
+        end
+        fpnew_pkg::INT4: begin
+          // lane 0 → mantissa_a_i[23:20] (4-bit slot)
+          mantissa_a_int[23:20] = int4_a_mag[0];
+          mantissa_b_int[23:20] = int4_b_mag[0];
+          // lane 1 → mantissa_a_simd_i[10:7] (4-bit slot)
+          mantissa_a_simd_int[10:7] = int4_a_mag[1];
+          mantissa_b_simd_int[10:7] = int4_b_mag[1];
+          // lane 2 → mantissa_a_fp8_1_i[3:0] (4-bit slot)
+          mantissa_a_fp8_1_int = int4_a_mag[2];
+          mantissa_b_fp8_1_int = int4_b_mag[2];
+          // lane 3 → mantissa_a_fp8_2_i[3:0] (4-bit slot)
+          mantissa_a_fp8_2_int = int4_a_mag[3];
+          mantissa_b_fp8_2_int = int4_b_mag[3];
+        end
+        default: ;  // leave all '0
+      endcase
+    end
+  end else begin : g_int_mantissa_stub
+    assign mantissa_a_int       = '0;
+    assign mantissa_b_int       = '0;
+    assign mantissa_a_simd_int  = '0;
+    assign mantissa_b_simd_int  = '0;
+    assign mantissa_a_fp8_1_int = '0;
+    assign mantissa_b_fp8_1_int = '0;
+    assign mantissa_a_fp8_2_int = '0;
+    assign mantissa_b_fp8_2_int = '0;
   end
 
 `ifdef DEBUG_INT_DP
@@ -554,7 +608,12 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     localparam int unsigned EXP_BITS = fpnew_pkg::exp_bits(fpnew_pkg::fp_format_e'(fmt));
     localparam int unsigned MAN_BITS = fpnew_pkg::man_bits(fpnew_pkg::fp_format_e'(fmt));
 
-    if (fmt==fpnew_pkg::FP16 || fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP16ALT || fmt==fpnew_pkg::FP8ALT) begin : active_format // FP16 / BF16 / FP8 (E4M3) / FP8ALT (E5M2) ride this SIMD-lane decode
+    // The SIMD lane unpacks `operands_q_simd[op]` (= WIDTH/2 bits) into one
+    // operand of FpFormat=fmt. If the format wouldn't fit (FP_WIDTH > WIDTH/2)
+    // the lane is structurally inactive — this lets masks like FP16+FP8+FP4
+    // (WIDTH=16 → SIMD half=8) elaborate without the FP16-SIMD slice failing.
+    if ((fmt==fpnew_pkg::FP16 || fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP16ALT || fmt==fpnew_pkg::FP8ALT)
+        && (FP_WIDTH <= WIDTH/2)) begin : active_format
       localparam fpnew_pkg::fp_format_e FpFormat = fpnew_pkg::fp_format_e'(fmt);
       logic [2:0][FP_WIDTH-1:0] trimmed_ops;
 
@@ -608,7 +667,9 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     localparam int unsigned EXP_BITS = fpnew_pkg::exp_bits(fpnew_pkg::fp_format_e'(fmt));
     localparam int unsigned MAN_BITS = fpnew_pkg::man_bits(fpnew_pkg::fp_format_e'(fmt));
 
-    if (fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP8ALT) begin : active_format // FP8 (E4M3) and FP8ALT (E5M2) ride this FP8-DP lane decode
+    // FP8-DP lane 1 unpacks operands_q_fp8_1 (= WIDTH/4 bits). Inactive
+    // when FP_WIDTH > WIDTH/4 (e.g. WIDTH=16 can't host the FP8 fp8_1 lane).
+    if ((fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP8ALT) && (FP_WIDTH <= WIDTH/4)) begin : active_format
       localparam fpnew_pkg::fp_format_e FpFormat = fpnew_pkg::fp_format_e'(fmt);
       logic [2:0][FP_WIDTH-1:0] trimmed_ops;
 
@@ -661,7 +722,8 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     localparam int unsigned EXP_BITS = fpnew_pkg::exp_bits(fpnew_pkg::fp_format_e'(fmt));
     localparam int unsigned MAN_BITS = fpnew_pkg::man_bits(fpnew_pkg::fp_format_e'(fmt));
 
-    if (fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP8ALT) begin : active_format // FP8 (E4M3) and FP8ALT (E5M2) ride this FP8-DP lane decode
+    // FP8-DP lane 2 — same WIDTH/4 sizing constraint as lane 1 above.
+    if ((fmt==fpnew_pkg::FP8 || fmt==fpnew_pkg::FP8ALT) && (FP_WIDTH <= WIDTH/4)) begin : active_format
       localparam fpnew_pkg::fp_format_e FpFormat = fpnew_pkg::fp_format_e'(fmt);
       logic [2:0][FP_WIDTH-1:0] trimmed_ops;
 
@@ -1257,22 +1319,37 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .y_sign(y_sign[1]),
     .y_mag(y_mag[1])  // exact: value = y_mag * 0.25
   );
-  transdot_fp4_dp_qtr10 fp4_2_term_dp_lane2 (
-    .a0(operands_q[0][19:16]),
-    .b0(operands_q[1][19:16]),
-    .a1(operands_q[0][23:20]),
-    .b1(operands_q[1][23:20]),
-    .y_sign(y_sign[2]),
-    .y_mag(y_mag[2])  // exact: value = y_mag * 0.25
-  );
-  transdot_fp4_dp_qtr10 fp4_2_term_dp_lane3 (
-    .a0(operands_q[0][27:24]),
-    .b0(operands_q[1][27:24]),
-    .a1(operands_q[0][31:28]),
-    .b1(operands_q[1][31:28]),
-    .y_sign(y_sign[3]),
-    .y_mag(y_mag[3])  // exact: value = y_mag * 0.25
-  );
+  // FP4 DP lane 2 reads operand bits [23:16] — gated on WIDTH >= 24.
+  // For narrower PE configs (e.g. FP16+FP8+FP4 with WIDTH=16) the lane
+  // is structurally absent and y_sign/y_mag[2] are stubbed to 0.
+  if (WIDTH >= 24) begin : g_fp4_lane2
+    transdot_fp4_dp_qtr10 fp4_2_term_dp_lane2 (
+      .a0(operands_q[0][19:16]),
+      .b0(operands_q[1][19:16]),
+      .a1(operands_q[0][23:20]),
+      .b1(operands_q[1][23:20]),
+      .y_sign(y_sign[2]),
+      .y_mag(y_mag[2])
+    );
+  end else begin : g_fp4_lane2_stub
+    assign y_sign[2] = 1'b0;
+    assign y_mag[2]  = '0;
+  end
+
+  // FP4 DP lane 3 reads operand bits [31:24] — gated on WIDTH >= 32.
+  if (WIDTH >= 32) begin : g_fp4_lane3
+    transdot_fp4_dp_qtr10 fp4_2_term_dp_lane3 (
+      .a0(operands_q[0][27:24]),
+      .b0(operands_q[1][27:24]),
+      .a1(operands_q[0][31:28]),
+      .b1(operands_q[1][31:28]),
+      .y_sign(y_sign[3]),
+      .y_mag(y_mag[3])
+    );
+  end else begin : g_fp4_lane3_stub
+    assign y_sign[3] = 1'b0;
+    assign y_mag[3]  = '0;
+  end
 
   assign tentative_sign_lane0 = inp_pipe_fp4_enable_q ? y_sign[0] : tentative_sign;
   assign tentative_sign_lane1 = inp_pipe_fp4_enable_q ? y_sign[1] : tentative_sign_simd;
