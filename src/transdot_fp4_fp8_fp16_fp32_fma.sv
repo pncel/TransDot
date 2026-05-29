@@ -1802,6 +1802,14 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   for (genvar i = 0; i < NUM_MID_REGS; i++) begin : gen_inside_pipeline
     // Internal register enable for this stage
     logic reg_ena;
+    // INT-mode power optimization: when the data flowing in from stage i is
+    // an INT op (mid_pipe_int_op_q[i]=1), the FP-side mid_pipe regs at
+    // stage i+1 are dead data — the INT result rides
+    // mid_pipe_int_result_q to the output mux, and the FP normalize/round
+    // back-end is already gated by post_norm_fp_pipe_en. Suppress the
+    // FP-side load enable so Genus can ICG-gate the ~150-bit-wide FP
+    // mid_pipe regs across all 4 lanes.
+    logic reg_ena_fp;
     // Determine the ready signal of the current stage - advance the pipeline:
     // 1. if the next stage is ready for our data
     // 2. if the next stage only holds a bubble (not valid) -> we can pop it
@@ -1810,20 +1818,23 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     `FFLARNC(mid_pipe_valid_q[i+1], mid_pipe_valid_q[i], mid_pipe_ready[i], flush_i, 1'b0, clk_i, rst_ni)
     // Enable register if pipleine ready and a valid data item is present
     assign reg_ena = (mid_pipe_ready[i] & mid_pipe_valid_q[i]) | reg_ena_i[NUM_INP_REGS + i];
-    // Generate the pipeline registers within the stages, use enable-registers
-    `FFL(mid_pipe_eff_sub_q[i+1],     mid_pipe_eff_sub_q[i],     reg_ena, '0)
-    `FFL(mid_pipe_exp_prod_q[i+1],    mid_pipe_exp_prod_q[i],    reg_ena, '0)
-    `FFL(mid_pipe_exp_diff_q[i+1],    mid_pipe_exp_diff_q[i],    reg_ena, '0)
-    `FFL(mid_pipe_tent_exp_q[i+1],    mid_pipe_tent_exp_q[i],    reg_ena, '0)
-    `FFL(mid_pipe_add_shamt_q[i+1],   mid_pipe_add_shamt_q[i],   reg_ena, '0)
-    `FFL(mid_pipe_sticky_q[i+1],      mid_pipe_sticky_q[i],      reg_ena, '0)
-    `FFL(mid_pipe_sum_q[i+1],         mid_pipe_sum_q[i],         reg_ena, '0)
-    `FFL(mid_pipe_final_sign_q[i+1],  mid_pipe_final_sign_q[i],  reg_ena, '0)
-    `FFL(mid_pipe_rnd_mode_q[i+1],    mid_pipe_rnd_mode_q[i],    reg_ena, fpnew_pkg::RNE)
-    `FFL(mid_pipe_dst_fmt_q[i+1],     mid_pipe_dst_fmt_q[i],     reg_ena, fpnew_pkg::fp_format_e'(0))
-    `FFL(mid_pipe_res_is_spec_q[i+1], mid_pipe_res_is_spec_q[i], reg_ena, '0)
-    `FFL(mid_pipe_spec_res_q[i+1],    mid_pipe_spec_res_q[i],    reg_ena, '0)
-    `FFL(mid_pipe_spec_stat_q[i+1],   mid_pipe_spec_stat_q[i],   reg_ena, '0)
+    // FP-side load enable: only update FP-only regs when stage's input op is FP.
+    assign reg_ena_fp = reg_ena & ~mid_pipe_int_op_q[i];
+    // FP-only regs — gated by reg_ena_fp.
+    `FFL(mid_pipe_eff_sub_q[i+1],     mid_pipe_eff_sub_q[i],     reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_prod_q[i+1],    mid_pipe_exp_prod_q[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_diff_q[i+1],    mid_pipe_exp_diff_q[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_tent_exp_q[i+1],    mid_pipe_tent_exp_q[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_add_shamt_q[i+1],   mid_pipe_add_shamt_q[i],   reg_ena_fp, '0)
+    `FFL(mid_pipe_sticky_q[i+1],      mid_pipe_sticky_q[i],      reg_ena_fp, '0)
+    `FFL(mid_pipe_sum_q[i+1],         mid_pipe_sum_q[i],         reg_ena_fp, '0)
+    `FFL(mid_pipe_final_sign_q[i+1],  mid_pipe_final_sign_q[i],  reg_ena_fp, '0)
+    `FFL(mid_pipe_rnd_mode_q[i+1],    mid_pipe_rnd_mode_q[i],    reg_ena_fp, fpnew_pkg::RNE)
+    `FFL(mid_pipe_dst_fmt_q[i+1],     mid_pipe_dst_fmt_q[i],     reg_ena_fp, fpnew_pkg::fp_format_e'(0))
+    `FFL(mid_pipe_res_is_spec_q[i+1], mid_pipe_res_is_spec_q[i], reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_res_q[i+1],    mid_pipe_spec_res_q[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_stat_q[i+1],   mid_pipe_spec_stat_q[i],   reg_ena_fp, '0)
+    // Shared / INT-side regs — always advance.
     `FFL(mid_pipe_tag_q[i+1],         mid_pipe_tag_q[i],         reg_ena, TagType'('0))
     `FFL(mid_pipe_mask_q[i+1],        mid_pipe_mask_q[i],        reg_ena, '0)
     `FFL(mid_pipe_simd_enable_q[i+1], mid_pipe_simd_enable_q[i], reg_ena, '0)
@@ -1888,20 +1899,24 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   for (genvar i = 0; i < NUM_MID_REGS; i++) begin : gen_inside_pipeline_simd
     // Internal register enable for this stage
     logic reg_ena;
+    logic reg_ena_fp;
     // Enable register if pipleine ready and a valid data item is present
     assign reg_ena = (mid_pipe_ready[i] & mid_pipe_valid_q[i]) | reg_ena_i[NUM_INP_REGS + i];
+    // SIMD lane is FP-only — gate on int_op for the same reason as the
+    // main lane block above.
+    assign reg_ena_fp = reg_ena & ~mid_pipe_int_op_q[i];
     // Generate the pipeline registers within the stages, use enable-registers
-    `FFL(mid_pipe_eff_sub_q_simd[i+1],     mid_pipe_eff_sub_q_simd[i],     reg_ena, '0)
-    `FFL(mid_pipe_exp_prod_q_simd[i+1],    mid_pipe_exp_prod_q_simd[i],    reg_ena, '0)
-    `FFL(mid_pipe_exp_diff_q_simd[i+1],    mid_pipe_exp_diff_q_simd[i],    reg_ena, '0)
-    `FFL(mid_pipe_tent_exp_q_simd[i+1],    mid_pipe_tent_exp_q_simd[i],    reg_ena, '0)
-    `FFL(mid_pipe_add_shamt_q_simd[i+1],   mid_pipe_add_shamt_q_simd[i],   reg_ena, '0)
-    `FFL(mid_pipe_sticky_q_simd[i+1],      mid_pipe_sticky_q_simd[i],      reg_ena, '0)
-    `FFL(mid_pipe_sum_q_simd[i+1],         mid_pipe_sum_q_simd[i],         reg_ena, '0)
-    `FFL(mid_pipe_final_sign_q_simd[i+1],  mid_pipe_final_sign_q_simd[i],  reg_ena, '0)
-    `FFL(mid_pipe_res_is_spec_q_simd[i+1], mid_pipe_res_is_spec_q_simd[i], reg_ena, '0)
-    `FFL(mid_pipe_spec_res_q_simd[i+1],    mid_pipe_spec_res_q_simd[i],    reg_ena, '0)
-    `FFL(mid_pipe_spec_stat_q_simd[i+1],   mid_pipe_spec_stat_q_simd[i],   reg_ena, '0)
+    `FFL(mid_pipe_eff_sub_q_simd[i+1],     mid_pipe_eff_sub_q_simd[i],     reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_prod_q_simd[i+1],    mid_pipe_exp_prod_q_simd[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_diff_q_simd[i+1],    mid_pipe_exp_diff_q_simd[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_tent_exp_q_simd[i+1],    mid_pipe_tent_exp_q_simd[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_add_shamt_q_simd[i+1],   mid_pipe_add_shamt_q_simd[i],   reg_ena_fp, '0)
+    `FFL(mid_pipe_sticky_q_simd[i+1],      mid_pipe_sticky_q_simd[i],      reg_ena_fp, '0)
+    `FFL(mid_pipe_sum_q_simd[i+1],         mid_pipe_sum_q_simd[i],         reg_ena_fp, '0)
+    `FFL(mid_pipe_final_sign_q_simd[i+1],  mid_pipe_final_sign_q_simd[i],  reg_ena_fp, '0)
+    `FFL(mid_pipe_res_is_spec_q_simd[i+1], mid_pipe_res_is_spec_q_simd[i], reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_res_q_simd[i+1],    mid_pipe_spec_res_q_simd[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_stat_q_simd[i+1],   mid_pipe_spec_stat_q_simd[i],   reg_ena_fp, '0)
   end
   // Output stage: assign selected pipe outputs to signals for later use
   assign effective_subtraction_q_simd = mid_pipe_eff_sub_q_simd[NUM_MID_REGS];
@@ -1956,20 +1971,23 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   for (genvar i = 0; i < NUM_MID_REGS; i++) begin : gen_inside_pipeline_fp8_1
     // Internal register enable for this stage
     logic reg_ena;
+    logic reg_ena_fp;
     // Enable register if pipleine ready and a valid data item is present
     assign reg_ena = (mid_pipe_ready[i] & mid_pipe_valid_q[i]) | reg_ena_i[NUM_INP_REGS + i];
+    // FP8 lane is FP-only — gate on int_op.
+    assign reg_ena_fp = reg_ena & ~mid_pipe_int_op_q[i];
     // Generate the pipeline registers within the stages, use enable-registers
-    `FFL(mid_pipe_eff_sub_q_fp8_1[i+1],     mid_pipe_eff_sub_q_fp8_1[i],     reg_ena, '0)
-    `FFL(mid_pipe_exp_prod_q_fp8_1[i+1],    mid_pipe_exp_prod_q_fp8_1[i],    reg_ena, '0)
-    `FFL(mid_pipe_exp_diff_q_fp8_1[i+1],    mid_pipe_exp_diff_q_fp8_1[i],    reg_ena, '0)
-    `FFL(mid_pipe_tent_exp_q_fp8_1[i+1],    mid_pipe_tent_exp_q_fp8_1[i],    reg_ena, '0)
-    `FFL(mid_pipe_add_shamt_q_fp8_1[i+1],   mid_pipe_add_shamt_q_fp8_1[i],   reg_ena, '0)
-    `FFL(mid_pipe_sticky_q_fp8_1[i+1],      mid_pipe_sticky_q_fp8_1[i],      reg_ena, '0)
-    `FFL(mid_pipe_sum_q_fp8_1[i+1],         mid_pipe_sum_q_fp8_1[i],         reg_ena, '0)
-    `FFL(mid_pipe_final_sign_q_fp8_1[i+1],  mid_pipe_final_sign_q_fp8_1[i],  reg_ena, '0)
-    `FFL(mid_pipe_res_is_spec_q_fp8_1[i+1], mid_pipe_res_is_spec_q_fp8_1[i], reg_ena, '0)
-    `FFL(mid_pipe_spec_res_q_fp8_1[i+1],    mid_pipe_spec_res_q_fp8_1[i],    reg_ena, '0)
-    `FFL(mid_pipe_spec_stat_q_fp8_1[i+1],   mid_pipe_spec_stat_q_fp8_1[i],   reg_ena, '0)
+    `FFL(mid_pipe_eff_sub_q_fp8_1[i+1],     mid_pipe_eff_sub_q_fp8_1[i],     reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_prod_q_fp8_1[i+1],    mid_pipe_exp_prod_q_fp8_1[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_diff_q_fp8_1[i+1],    mid_pipe_exp_diff_q_fp8_1[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_tent_exp_q_fp8_1[i+1],    mid_pipe_tent_exp_q_fp8_1[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_add_shamt_q_fp8_1[i+1],   mid_pipe_add_shamt_q_fp8_1[i],   reg_ena_fp, '0)
+    `FFL(mid_pipe_sticky_q_fp8_1[i+1],      mid_pipe_sticky_q_fp8_1[i],      reg_ena_fp, '0)
+    `FFL(mid_pipe_sum_q_fp8_1[i+1],         mid_pipe_sum_q_fp8_1[i],         reg_ena_fp, '0)
+    `FFL(mid_pipe_final_sign_q_fp8_1[i+1],  mid_pipe_final_sign_q_fp8_1[i],  reg_ena_fp, '0)
+    `FFL(mid_pipe_res_is_spec_q_fp8_1[i+1], mid_pipe_res_is_spec_q_fp8_1[i], reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_res_q_fp8_1[i+1],    mid_pipe_spec_res_q_fp8_1[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_stat_q_fp8_1[i+1],   mid_pipe_spec_stat_q_fp8_1[i],   reg_ena_fp, '0)
   end
   // Output stage: assign selected pipe outputs to signals for later use
   assign effective_subtraction_q_fp8_1 = mid_pipe_eff_sub_q_fp8_1[NUM_MID_REGS];
@@ -2025,20 +2043,23 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   for (genvar i = 0; i < NUM_MID_REGS; i++) begin : gen_inside_pipeline_fp8_2
     // Internal register enable for this stage
     logic reg_ena;
+    logic reg_ena_fp;
     // Enable register if pipleine ready and a valid data item is present
     assign reg_ena = (mid_pipe_ready[i] & mid_pipe_valid_q[i]) | reg_ena_i[NUM_INP_REGS + i];
+    // FP8 lane is FP-only — gate on int_op.
+    assign reg_ena_fp = reg_ena & ~mid_pipe_int_op_q[i];
     // Generate the pipeline registers within the stages, use enable-registers
-    `FFL(mid_pipe_eff_sub_q_fp8_2[i+1],     mid_pipe_eff_sub_q_fp8_2[i],     reg_ena, '0)
-    `FFL(mid_pipe_exp_prod_q_fp8_2[i+1],    mid_pipe_exp_prod_q_fp8_2[i],    reg_ena, '0)
-    `FFL(mid_pipe_exp_diff_q_fp8_2[i+1],    mid_pipe_exp_diff_q_fp8_2[i],    reg_ena, '0)
-    `FFL(mid_pipe_tent_exp_q_fp8_2[i+1],    mid_pipe_tent_exp_q_fp8_2[i],    reg_ena, '0)
-    `FFL(mid_pipe_add_shamt_q_fp8_2[i+1],   mid_pipe_add_shamt_q_fp8_2[i],   reg_ena, '0)
-    `FFL(mid_pipe_sticky_q_fp8_2[i+1],      mid_pipe_sticky_q_fp8_2[i],      reg_ena, '0)
-    `FFL(mid_pipe_sum_q_fp8_2[i+1],         mid_pipe_sum_q_fp8_2[i],         reg_ena, '0)
-    `FFL(mid_pipe_final_sign_q_fp8_2[i+1],  mid_pipe_final_sign_q_fp8_2[i],  reg_ena, '0)
-    `FFL(mid_pipe_res_is_spec_q_fp8_2[i+1], mid_pipe_res_is_spec_q_fp8_2[i], reg_ena, '0)
-    `FFL(mid_pipe_spec_res_q_fp8_2[i+1],    mid_pipe_spec_res_q_fp8_2[i],    reg_ena, '0)
-    `FFL(mid_pipe_spec_stat_q_fp8_2[i+1],   mid_pipe_spec_stat_q_fp8_2[i],   reg_ena, '0)
+    `FFL(mid_pipe_eff_sub_q_fp8_2[i+1],     mid_pipe_eff_sub_q_fp8_2[i],     reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_prod_q_fp8_2[i+1],    mid_pipe_exp_prod_q_fp8_2[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_exp_diff_q_fp8_2[i+1],    mid_pipe_exp_diff_q_fp8_2[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_tent_exp_q_fp8_2[i+1],    mid_pipe_tent_exp_q_fp8_2[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_add_shamt_q_fp8_2[i+1],   mid_pipe_add_shamt_q_fp8_2[i],   reg_ena_fp, '0)
+    `FFL(mid_pipe_sticky_q_fp8_2[i+1],      mid_pipe_sticky_q_fp8_2[i],      reg_ena_fp, '0)
+    `FFL(mid_pipe_sum_q_fp8_2[i+1],         mid_pipe_sum_q_fp8_2[i],         reg_ena_fp, '0)
+    `FFL(mid_pipe_final_sign_q_fp8_2[i+1],  mid_pipe_final_sign_q_fp8_2[i],  reg_ena_fp, '0)
+    `FFL(mid_pipe_res_is_spec_q_fp8_2[i+1], mid_pipe_res_is_spec_q_fp8_2[i], reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_res_q_fp8_2[i+1],    mid_pipe_spec_res_q_fp8_2[i],    reg_ena_fp, '0)
+    `FFL(mid_pipe_spec_stat_q_fp8_2[i+1],   mid_pipe_spec_stat_q_fp8_2[i],   reg_ena_fp, '0)
   end
   // Output stage: assign selected pipe outputs to signals for later use
   assign effective_subtraction_q_fp8_2 = mid_pipe_eff_sub_q_fp8_2[NUM_MID_REGS];
@@ -2224,6 +2245,20 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
       assign ready_for_post_norm_pipe = out_pipe_ready_0 | ~post_norm_valid_q;
       assign post_norm_pipe_en = mid_pipe_valid_q[NUM_MID_REGS] && ready_for_post_norm_pipe;
 
+      // INT-mode power optimization: the FP normalize/round back-end is
+      // bypassed at the output mux (result_d picks post_norm_int_result_q
+      // when post_norm_int_op_q is high), but the FP-side post_norm regs
+      // still toggle every cycle and feed a wide combinational round/
+      // classify stage. Split the FP post_norm regs into their own
+      // always_ff with enable gated by !int_op so Genus can insert a
+      // clock-gate cell that disables ~150-200 wide registers when in
+      // INT mode. INT-only/shared regs stay in the original block so
+      // they still update during INT ops.
+      logic post_norm_fp_pipe_en;
+      assign post_norm_fp_pipe_en =
+          post_norm_pipe_en && !mid_pipe_int_op_q[NUM_MID_REGS];
+
+      // FP-side post_norm registers — only update on FP ops.
       always_ff @(posedge clk_i) begin
         if (!rst_ni) begin
           final_mantissa_post_q          <= '0;
@@ -2268,13 +2303,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
           result_is_special_post_q_fp8_2     <= 1'b0;
           special_result_post_q_fp8_2        <= '0;
           special_status_post_q_fp8_2        <= '0;
-
-          post_norm_tag_q                 <= TagType'('0);
-          post_norm_mask_q                <= 1'b0;
-          post_norm_aux_q                 <= AuxType'('0);
-          post_norm_int_op_q              <= 1'b0;
-          post_norm_int_result_q          <= '0;
-        end else if (post_norm_pipe_en) begin
+        end else if (post_norm_fp_pipe_en) begin
           final_mantissa_post_q          <= final_mantissa;
           sum_sticky_bits_post_q         <= sum_sticky_bits;
           final_exponent_post_q          <= final_exponent;
@@ -2317,7 +2346,18 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
           result_is_special_post_q_fp8_2     <= result_is_special_q_fp8_2;
           special_result_post_q_fp8_2        <= special_result_q_fp8_2;
           special_status_post_q_fp8_2        <= special_status_q_fp8_2;
+        end
+      end
 
+      // Shared + INT-side post_norm registers — always update.
+      always_ff @(posedge clk_i) begin
+        if (!rst_ni) begin
+          post_norm_tag_q                 <= TagType'('0);
+          post_norm_mask_q                <= 1'b0;
+          post_norm_aux_q                 <= AuxType'('0);
+          post_norm_int_op_q              <= 1'b0;
+          post_norm_int_result_q          <= '0;
+        end else if (post_norm_pipe_en) begin
           post_norm_tag_q                 <= mid_pipe_tag_q[NUM_MID_REGS];
           post_norm_mask_q                <= mid_pipe_mask_q[NUM_MID_REGS];
           post_norm_aux_q                 <= mid_pipe_aux_q[NUM_MID_REGS];
