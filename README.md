@@ -67,6 +67,28 @@ docs/                         # Documentation
 
 For the no-DP variant, comment out `auto_ungroup none` in the synthesis script to enable flattening (yields 5-12% area savings vs FPnew baseline at all timing points).
 
+### Area vs. enabled-format subset
+
+`FpFmtMask` (plus the runtime `src_fmt` masking used by the sweep wrappers)
+lets Genus prune the slices of disabled formats, so PE area scales with the
+format subset that is actually turned on. The figure below sweeps every
+non-empty subset of {FP32, FP16, BF16, FP8 (E4M3), FP8alt (E5M2), FP4} --
+63 synthesis runs -- plus three INT-enabled configurations.
+
+![PE cell area across enabled-format subsets](docs/fig/pe_area_format_sweep.png)
+
+Post-synthesis cell area of one 2-term dot-product PE (Genus 25.10,
+TSMC 28 nm, SS 0.72 V / 125 C, 1 GHz target, `ADDMUL_ONLY_PIPE3`), grouped by
+number of enabled formats and sorted by area within each group; the matrix
+below each bar gives the enabled subset. Range: 6.40k um^2 (FP32 only) to
+12.16k um^2 (all six FP formats) to 13.49k um^2 (all FP + INT4/8/16). Mean
+marginal cost of enabling one more format: FP32 +0.31k, FP8 +0.47k,
+FP16 +0.60k, BF16 +0.71k, FP8alt +0.84k, FP4 +1.70k um^2 -- strongly
+non-additive, since the formats share datapath.
+
+Sweep driver, per-case synthesis dirs, and the plotting script live in the
+`multi-format-systolic-array` repository under `syn/pe_area_sweep/`.
+
 ---
 
 # FPnew - New Floating-Point Unit with Transprecision Capabilities
