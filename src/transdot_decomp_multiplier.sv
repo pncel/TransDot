@@ -470,6 +470,12 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   input  logic                         sign_lane2,
   input  logic                         sign_lane3,
 
+  // NVFP4 fractional block scale: mu = (8+m_a)*(8+m_b), the significand
+  // product of the two E4M3 block scales, with /64 implied.  mu = 8'd64 is
+  // 1.0 and makes this module bit-identical to its pre-NVFP4 behaviour; a
+  // build that ties it to 64 has the scaling logic optimized away entirely.
+  input  logic [7:0]                   fp4_scale_mu,
+
   input  logic [8:0]                   fp4_y_mag0,
   input  logic [8:0]                   fp4_y_mag1,
   input  logic [8:0]                   fp4_y_mag2,
@@ -594,6 +600,34 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
 
   // FP4 uses the same outer path as FP8: build one aligned signed term per
   // lane, then feed all four terms into the shared final compressor.
+  // All four FP4 lanes sit at the same alignment (qtr10 already applied the
+  // per-element exponent shift) and share one block scale, so
+  //     mu * (+/-y0 +/-y1 +/-y2 +/-y3)  ==  sum of mu*(+/-yi)
+  // exactly.  Summing first turns four 9x8 multiplies into one 11x8, and
+  // keeping the result out of the shared 50-bit compressor avoids putting
+  // FP4 into the muxes on all four of its inputs.
+`ifdef NVFP4_ENABLE
+  logic signed [11:0] fp4_sum;
+  assign fp4_sum = (sign_lane0 ? -$signed({3'b000, fp4_y_mag0})
+                               :  $signed({3'b000, fp4_y_mag0}))
+                 + (sign_lane1 ? -$signed({3'b000, fp4_y_mag1})
+                               :  $signed({3'b000, fp4_y_mag1}))
+                 + (sign_lane2 ? -$signed({3'b000, fp4_y_mag2})
+                               :  $signed({3'b000, fp4_y_mag2}))
+                 + (sign_lane3 ? -$signed({3'b000, fp4_y_mag3})
+                               :  $signed({3'b000, fp4_y_mag3}));
+
+  logic        fp4_sum_neg;
+  logic [10:0] fp4_sum_mag;
+  logic [18:0] fp4_prod;
+  logic [49:0] fp4_term_mag, fp4_term;
+  assign fp4_sum_neg  = fp4_sum[11];
+  assign fp4_sum_mag  = fp4_sum_neg ? (~fp4_sum[10:0] + 11'd1) : fp4_sum[10:0];
+  assign fp4_prod     = fp4_sum_mag * fp4_scale_mu;   // 11 x 8, exact
+  assign fp4_term_mag = {fp4_prod, 31'd0};
+  assign fp4_term     = fp4_sum_neg ? (~fp4_term_mag + 50'd1) : fp4_term_mag;
+`endif
+
   assign aligned_fp4_00 = {2'b00, fp4_y_mag0, 13'd0};
   assign aligned_fp4_11 = {2'b00, fp4_y_mag1, 13'd0};
   assign aligned_fp4_22 = {2'b00, fp4_y_mag2, 13'd0};
@@ -615,19 +649,36 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
   logic [49:0]  pp3_addend_lane0_ext, pp3_addend_lane1_ext, pp3_addend_lane2_ext, pp3_addend_lane3_ext;
   assign pp3_addend_lane0 = dp_sel_fp8 ? {xored_pp_00,24'd0}
                            : dp_sel_fp16 ? {xored_pp16_0,12'd0}
+`ifndef NVFP4_ENABLE
                            : dp_sel_fp4 ? {xored_fp4_00,24'd0}
+`endif
                            : {24'd0,pp3_res[0]};
   assign pp3_addend_lane1 = dp_sel_fp8 ? {xored_pp_11,24'd0}
                            : dp_sel_fp16 ? {xored_pp16_1,12'd0}
+`ifndef NVFP4_ENABLE
                            : dp_sel_fp4 ? {xored_fp4_11,24'd0}
+`endif
+`ifndef NVFP4_ENABLE
+                           : dp_sel_fp4 ? {xored_fp4_11,24'd0}
+`endif
                            : {12'd0,pp3_res[1],12'd0};
   assign pp3_addend_lane2 = dp_sel_fp8 ? {xored_pp_22,24'd0}
                            : dp_sel_fp16 ? 48'd0
+`ifndef NVFP4_ENABLE
                            : dp_sel_fp4 ? {xored_fp4_22,24'd0}
+`endif
+`ifndef NVFP4_ENABLE
+                           : dp_sel_fp4 ? {xored_fp4_22,24'd0}
+`endif
                            : {12'd0,pp3_res[2],12'd0};
   assign pp3_addend_lane3 = dp_sel_fp8 ? {xored_pp_33,24'd0}
                            : dp_sel_fp16 ? 48'd0
+`ifndef NVFP4_ENABLE
                            : dp_sel_fp4 ? {xored_fp4_33,24'd0}
+`endif
+`ifndef NVFP4_ENABLE
+                           : dp_sel_fp4 ? {xored_fp4_33,24'd0}
+`endif
                            : {pp3_res[3],24'd0};
 
   assign pp3_addend_lane0_ext = (dp_sel_fp8 || dp_sel_fp16 || dp_sel_fp4) ? {{2{pp3_addend_lane0[47]}}, pp3_addend_lane0}
@@ -648,13 +699,24 @@ module transdot_decomp_multiplier_w6_4lane_dp_piped #(
     .in3(pp3_addend_lane3_ext),
     .sum(final_sum)
   );
-  assign final_sum_neg = final_sum[49];
-  assign final_sum_mag = final_sum_neg ? $unsigned(-$signed(final_sum)) : final_sum;
-  assign product_non_dp_d = final_sum[47:0];
+  // FP4 takes its own 12-bit adder + 11x8 multiply rather than the shared
+  // 50-bit 4-input compressor.  INT4, which reuses these lanes, still reads
+  // a correct product_int_dp_o because eff_sum feeds every consumer exactly
+  // as final_sum did (mu = 64 is the identity).
+  logic [49:0] eff_sum;
+`ifdef NVFP4_ENABLE
+  assign eff_sum = dp_sel_fp4 ? fp4_term : final_sum;
+`else
+  assign eff_sum = final_sum;
+`endif
+
+  assign final_sum_neg = eff_sum[49];
+  assign final_sum_mag = final_sum_neg ? $unsigned(-$signed(eff_sum)) : eff_sum;
+  assign product_non_dp_d = eff_sum[47:0];
   assign product_dp_d = is_fp4 ? final_sum_mag[47:0] : final_sum_mag[48:1];
   // INT path: signed compressor sum, full 50-bit signed (the FMA picks the
   // bit-window that matches int_fmt and applies further alignment as needed).
-  assign product_int_dp_d = final_sum;
+  assign product_int_dp_d = eff_sum;
   assign sign_out_d = dp_enable_i ? ((final_sum_mag == 50'd0) ? 1'b0 : final_sum_neg) : 1'b0;
 
 `ifdef COMBINATIONAL
@@ -1224,6 +1286,7 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
   input  logic                         tentative_sign_lane2_i,
   input  logic                         tentative_sign_lane3_i,
 
+  input  logic [7:0]                   fp4_scale_mu_i,
   input  logic [8:0]                   fp4_y_mag0_i,
   input  logic [8:0]                   fp4_y_mag1_i,
   input  logic [8:0]                   fp4_y_mag2_i,
@@ -1313,6 +1376,7 @@ module transdot_decomp_multiplier_w6_direct_outputs #(
     .sign_lane1       ( tentative_sign_lane1_i ),
     .sign_lane2       ( tentative_sign_lane2_i ),
     .sign_lane3       ( tentative_sign_lane3_i ),
+    .fp4_scale_mu     ( fp4_scale_mu_i ),
     .fp4_y_mag0       ( fp4_y_mag0_i ),
     .fp4_y_mag1       ( fp4_y_mag1_i ),
     .fp4_y_mag2       ( fp4_y_mag2_i ),

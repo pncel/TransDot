@@ -37,6 +37,10 @@ module fpnew_opgroup_multifmt_slice #(
   input logic                                     clk_i,
   input logic                                     rst_ni,
   // Input signals
+  // NVFP4 block-scale significand product, forwarded to the FP4 lanes.
+  // 8'd64 == 1.0; tying it to 64 removes the scaling logic entirely.
+  input  logic [7:0]                              fp4_scale_mu_i,
+  input  logic signed [5:0]                       fp4_scale_e_i,
   input logic [NUM_OPERANDS-1:0][Width-1:0]       operands_i,
   input logic [NUM_FORMATS-1:0][NUM_OPERANDS-1:0] is_boxed_i,
   input fpnew_pkg::roundmode_e                    rnd_mode_i,
@@ -256,6 +260,8 @@ FP8/FP4. Please use the PULP DivSqrt unit when in need of div/sqrt operations on
         ) i_fpnew_fma_multi (
           .clk_i,
           .rst_ni,
+          .fp4_scale_mu_i  ( fp4_scale_mu_i ),
+          .fp4_scale_e_i   ( fp4_scale_e_i ),
           .operands_i      ( local_operands                                  ),
           .is_boxed_i,
           .rnd_mode_i,

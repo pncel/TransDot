@@ -31,6 +31,10 @@ module fpnew_top #(
   input logic                               clk_i,
   input logic                               rst_ni,
   // Input signals
+  // NVFP4 block-scale significand product, forwarded to the FP4 lanes.
+  // 8'd64 == 1.0; tying it to 64 removes the scaling logic entirely.
+  input logic [7:0]                               fp4_scale_mu_i = 8'd64,
+  input logic signed [5:0]                        fp4_scale_e_i  = 6'sd0,
   input logic [NUM_OPERANDS-1:0][WIDTH-1:0] operands_i,
   input fpnew_pkg::roundmode_e              rnd_mode_i,
   input fpnew_pkg::operation_e              op_i,
@@ -137,6 +141,8 @@ module fpnew_top #(
     ) i_opgroup_block (
       .clk_i,
       .rst_ni,
+      .fp4_scale_mu_i  ( fp4_scale_mu_i          ),
+      .fp4_scale_e_i   ( fp4_scale_e_i           ),
       .operands_i      ( operands_i[NUM_OPS-1:0] ),
       .is_boxed_i      ( input_boxed             ),
       .rnd_mode_i,

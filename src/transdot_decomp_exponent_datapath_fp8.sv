@@ -67,6 +67,10 @@ module transdot_decomp_exponent_datapath_fp8 #(
   input  logic                               dp_enable_i,
   input  logic                               simd_enable_i,
   input  logic                               fp4_enable_i,
+  // NVFP4 e-fold: signed E4M3 block-scale exponent sum (e_a+e_b-14), added
+  // to the FP4 DP product exponent so the existing addend aligner applies
+  // the power-of-two half of the block scale. Tie to 0 for OBSR/MX configs.
+  input  logic signed [5:0]                  fp4_scale_e_i,
 
   // ---------------- Outputs ----------------
   output logic signed [EXP_WIDTH-1:0]        exponent_addend_o,
@@ -280,7 +284,7 @@ module transdot_decomp_exponent_datapath_fp8 #(
   // matching `product_shifted_selected` change in the addend datapath
   // (4'd0 -> 3'd0 LSB pad) keeps the represented value invariant under
   // the higher anchor.
-  assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? 10'sd132
+  assign exp_product_lane0 = dp_enable_i ? (fp4_enable_i ? (10'sd132 + 10'(fp4_scale_e_i))
                                                          : (exp_product_largest + 10'sd2))
                                          : exponent_product;
 

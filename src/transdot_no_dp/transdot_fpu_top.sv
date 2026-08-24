@@ -13,6 +13,9 @@ module transdot_fpu_top#(
   input logic                               clk_i,
   input logic                               rst_ni,
   // Input signals
+  // NVFP4 block-scale significand product, forwarded to the FP4 lanes.
+  // 8'd64 == 1.0; tying it to 64 removes the scaling logic entirely.
+  input logic [7:0]                               fp4_scale_mu_i = 8'd64,
   input logic [NUM_OPERANDS-1:0][WIDTH-1:0] operands_i,
   input fpnew_pkg::roundmode_e              rnd_mode_i,
   input fpnew_pkg::operation_e              op_i,
@@ -48,6 +51,7 @@ fpnew_top #(
 ) i_fpnew_top (
   .clk_i,
   .rst_ni,
+  .fp4_scale_mu_i,
   .operands_i,
   .rnd_mode_i,
   .op_i,

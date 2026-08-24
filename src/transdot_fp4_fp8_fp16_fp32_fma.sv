@@ -29,6 +29,11 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   input  logic                        clk_i,
   input  logic                        rst_ni,
   // Input signals
+  // NVFP4 block-scale significand product; 8'd64 == 1.0 (no scaling).
+  input  logic [7:0]                  fp4_scale_mu_i,
+  // NVFP4 e-fold: E4M3 block-scale exponent sum, added to the FP4 DP product
+  // exponent (0 = off; OBSR handles the exponent half instead).
+  input  logic signed [5:0]           fp4_scale_e_i,
   input  logic [2:0][WIDTH-1:0]       operands_i, // 3 operands
   input  logic [NUM_FORMATS-1:0][2:0] is_boxed_i, // 3 operands
   input  fpnew_pkg::roundmode_e       rnd_mode_i,
@@ -1151,6 +1156,8 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   logic [SHIFT_AMOUNT_WIDTH_FP8-1:0] dp_shamt2, dp_shamt3;
 
 
+    logic signed [5:0] fp4_scale_e_q;   // driven by gen_e_pipe/gen_e_bypass below
+
   transdot_decomp_exponent_datapath_fp8 #(
     .EXP_WIDTH(EXP_WIDTH),  // internal exponent width
     .SUPER_EXP_BITS(SUPER_EXP_BITS),  // exponent width of superformat
@@ -1202,6 +1209,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .dp_enable_i     ( inp_pipe_dp_enable_q ),
     .simd_enable_i   ( inp_pipe_simd_enable_q ),
     .fp4_enable_i   ( inp_pipe_fp4_enable_q ),
+    .fp4_scale_e_i  ( fp4_scale_e_q ),
 
     .exponent_addend_o(exponent_addend),
     .exponent_product_o(exponent_product),
@@ -1362,6 +1370,48 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
   // inside the wrapper) is exposed as product_int_dp for Phase F.
   // (declarations of product_int_dp / int_*_qq are at the top of the module)
 
+  // NVFP4 scale must reach the FP4 lanes in the same pipeline stage as the
+  // operands it scales.  pe_tile drives the FPU with in_valid_i/out_ready_i
+  // tied high (no back-pressure), so a plain NUM_INP_REGS-deep delay is
+  // equivalent to routing mu through the handshaking input pipeline.
+  logic [7:0] fp4_scale_mu_q;
+  if (NUM_INP_REGS == 0) begin : gen_mu_bypass
+    assign fp4_scale_mu_q = fp4_scale_mu_i;
+  end else begin : gen_mu_pipe
+    logic [7:0] mu_pipe [NUM_INP_REGS];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int i = 0; i < NUM_INP_REGS; i++) mu_pipe[i] <= 8'd64;
+      end else if (flush_i) begin
+        for (int i = 0; i < NUM_INP_REGS; i++) mu_pipe[i] <= 8'd64;
+      end else begin
+        mu_pipe[0] <= fp4_scale_mu_i;
+        for (int i = 1; i < NUM_INP_REGS; i++) mu_pipe[i] <= mu_pipe[i-1];
+      end
+    end
+    assign fp4_scale_mu_q = mu_pipe[NUM_INP_REGS-1];
+  end
+
+  // e-fold exponent rides the same NUM_INP_REGS delay as mu (same rationale).
+  // (fp4_scale_e_q is declared next to the exponent-datapath instance above,
+  // which reads it -- an implicit 1-bit net there cost a debug session.)
+  if (NUM_INP_REGS == 0) begin : gen_e_bypass
+    assign fp4_scale_e_q = fp4_scale_e_i;
+  end else begin : gen_e_pipe
+    logic signed [5:0] e_pipe [NUM_INP_REGS];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int i = 0; i < NUM_INP_REGS; i++) e_pipe[i] <= 6'sd0;
+      end else if (flush_i) begin
+        for (int i = 0; i < NUM_INP_REGS; i++) e_pipe[i] <= 6'sd0;
+      end else begin
+        e_pipe[0] <= fp4_scale_e_i;
+        for (int i = 1; i < NUM_INP_REGS; i++) e_pipe[i] <= e_pipe[i-1];
+      end
+    end
+    assign fp4_scale_e_q = e_pipe[NUM_INP_REGS-1];
+  end
+
   transdot_decomp_multiplier_w6_direct_outputs #(
     .PRECISION_BITS      ( PRECISION_BITS ),
     .PRECISION_BITS_SIMD ( PRECISION_BITS_SIMD ),
@@ -1382,6 +1432,7 @@ module transdot_fp4_fp8_fp16_fp32_fma #(
     .tentative_sign_lane1_i( int_op_inp ? int_prod_sign[1] : tentative_sign_lane1 ),
     .tentative_sign_lane2_i( int_op_inp ? int_prod_sign[2] : tentative_sign_lane2 ),
     .tentative_sign_lane3_i( int_op_inp ? int_prod_sign[3] : tentative_sign_lane3 ),
+    .fp4_scale_mu_i        ( fp4_scale_mu_q ),
     .fp4_y_mag0_i          ( int_op_inp ? int4_y_mag[0] : y_mag[0] ),
     .fp4_y_mag1_i          ( int_op_inp ? int4_y_mag[1] : y_mag[1] ),
     .fp4_y_mag2_i          ( int_op_inp ? int4_y_mag[2] : y_mag[2] ),
